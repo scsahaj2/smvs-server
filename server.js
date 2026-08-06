@@ -985,7 +985,7 @@ function defaultFeatures() {
     allowFileUpload: false,
     allowIncognito: false,
     allowJavaScript: true,
-    allowThirdPartyCookies: false,
+    allowThirdPartyCookies: true,   // required for Google / SSO sign-in
     forceHttps: true,
     allowAddressBar: true,
     allowOpenInExternalApp: false,
