@@ -396,7 +396,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <table>
         <thead><tr>
           <th>User</th><th>Role</th><th>Rules</th><th>Time rules</th>
-          <th>Status</th><th>Last sync</th><th></th>
+          <th>Login sync</th><th>Status</th><th>Last sync</th><th></th>
         </tr></thead>
         <tbody id="userRows"></tbody>
       </table>
@@ -457,6 +457,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <input type="checkbox" id="fEnabled" checked style="width:auto">
       <span style="color:var(--text);font-size:14px">Account enabled (can sign in)</span>
     </label>
+
+    <div style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:0">
+        <input type="checkbox" id="fSyncSessions" style="width:auto;margin-top:3px">
+        <span style="color:var(--text);font-size:14px">
+          <b>Share website logins across this profile's phones</b><br>
+          <span class="muted">
+            Sign in to a site on one phone and the profile's other phones are
+            signed in too. Logins survive switching SMVS users.
+          </span>
+        </span>
+      </label>
+      <p class="muted" style="margin:8px 0 0;color:#8A6D00">
+        &#9888; These are live login sessions. Anyone with access to this server
+        could use them. Chrome deliberately does not sync cookies for this
+        reason. Turn this on only for profiles you trust on phones you control.
+      </p>
+      <button id="btnClearSessions" class="danger hidden"
+              style="margin-top:10px;font-size:12px" onclick="clearSessions()">
+        Clear saved website logins for this profile
+      </button>
+    </div>
 
     <hr style="margin:18px 0;border:0;border-top:1px solid var(--border)">
 
@@ -669,6 +691,9 @@ function openEditor(id) {
   $('fRole').value = editing ? editing.role : 'student';
   $('fHome').value = editing ? (editing.homeUrl || '') : 'https://www.wikipedia.org/';
   $('fEnabled').checked = editing ? !!editing.enabled : true;
+  $('fSyncSessions').checked = editing ? !!editing.syncWebSessions : false;
+  $('btnClearSessions').classList.toggle(
+    'hidden', !(editing && editing.hasSyncedSession));
   $('fAllowed').value = editing ? (editing.allowedPatterns || []).join('\\n') : '';
   $('fBlocked').value = editing ? (editing.blockedPatterns || []).join('\\n') : '';
 
@@ -835,6 +860,7 @@ async function saveUser() {
     email: $('fEmail').value.trim(),
     role: $('fRole').value,
     enabled: $('fEnabled').checked,
+    syncWebSessions: $('fSyncSessions').checked,
     mode: 'category',
     allowedPatterns: lines($('fAllowed').value),
     blockedPatterns: lines($('fBlocked').value),
@@ -861,6 +887,17 @@ async function saveUser() {
   }
 
   function showErr(m) { err.textContent = m; err.classList.remove('hidden'); }
+}
+
+async function clearSessions() {
+  if (!editing) return;
+  if (!confirm('Sign this profile out of every website on all its phones?')) return;
+  try {
+    await api('/api/admin/users/' + editing.id + '/sessions/clear', { method: 'POST' });
+    $('btnClearSessions').classList.add('hidden');
+    toast('Website logins cleared');
+    await refresh();
+  } catch (e) { alert(e.message); }
 }
 
 async function removeUser(id, name) {
@@ -924,8 +961,9 @@ app.get('/app.js', (_req, res) => {
 function db() { return load(); }
 
 function publicUser(u) {
-  const { passwordHash, ...rest } = u;
-  return rest;
+  // Never send the password hash or the encrypted cookie jar to the browser.
+  const { passwordHash, sessionBlob, ...rest } = u;
+  return { ...rest, hasSyncedSession: !!u.sessionBlob };
 }
 
 function policyOf(u) {
@@ -1018,6 +1056,10 @@ function seed() {
         categoryRules: t.rules,
         uncategorizedAction: t.rules.uncategorized || 'alert',
         timeRules: [],
+        syncWebSessions: false,
+        sessionBlob: null,
+        sessionVersion: 0,
+        sessionUpdatedAt: 0,
         features: defaultFeatures(),
         homeUrl: t.homeUrl,
         createdAt: Date.now(),
@@ -1175,6 +1217,10 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
     categoryRules: b.categoryRules || t.rules,
     uncategorizedAction: b.uncategorizedAction || 'alert',
     timeRules: (b.timeRules || []).map(scheduleUtil.normalise),
+    syncWebSessions: b.syncWebSessions === true,
+    sessionBlob: null,
+    sessionVersion: 0,
+    sessionUpdatedAt: 0,
     features: { ...defaultFeatures(), ...(b.features || {}) },
     homeUrl: b.homeUrl || t.homeUrl,
     createdAt: Date.now(),
@@ -1213,6 +1259,16 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
   if (b.uncategorizedAction !== undefined) user.uncategorizedAction = b.uncategorizedAction;
   if (b.features !== undefined) user.features = { ...defaultFeatures(), ...b.features };
   if (b.homeUrl !== undefined) user.homeUrl = b.homeUrl;
+  if (b.syncWebSessions !== undefined) {
+    const turningOff = user.syncWebSessions && !b.syncWebSessions;
+    user.syncWebSessions = !!b.syncWebSessions;
+    // Turning it off must not leave a copy of the cookies on the server.
+    if (turningOff) {
+      user.sessionBlob = null;
+      user.sessionVersion = (user.sessionVersion || 0) + 1;
+      user.sessionUpdatedAt = Date.now();
+    }
+  }
 
   if (b.timeRules !== undefined) {
     const cleaned = [];
@@ -1246,6 +1302,73 @@ app.get('/api/admin/activity', requireAdmin, (req, res) => {
 
 // ---------------------------------------------------------------- misc
 
+// ===================================================================
+// SECTION 5b — web session sync (cookie jar per profile)
+// ===================================================================
+//
+// Lets a profile's website logins follow them to another phone: sign in to a
+// site on phone 1, and phone 2 running the same profile is already signed in.
+//
+// SECURITY NOTE — please read:
+// These are live session cookies. Anyone who can read this database can take
+// over those website accounts. Google Chrome deliberately does NOT sync
+// cookies for exactly this reason (it syncs passwords instead). This feature
+// is opt-in per profile (`syncWebSessions`) and defaults to OFF.
+//
+// Mitigations applied here:
+//   - the blob is encrypted by the DEVICE before upload; the server stores
+//     ciphertext it cannot read
+//   - `sessionVersion` gives last-writer-wins without merge corruption
+//   - a profile can be wiped remotely by the admin (POST .../sessions/clear)
+
+app.get('/api/me/websession', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+  if (!user.syncWebSessions) {
+    return res.json({ enabled: false, version: 0, blob: null });
+  }
+  res.json({
+    enabled: true,
+    version: user.sessionVersion || 0,
+    blob: user.sessionBlob || null,
+    updatedAt: user.sessionUpdatedAt || 0
+  });
+});
+
+app.put('/api/me/websession', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+  if (!user.syncWebSessions) {
+    return res.status(409).json({ message: 'Session sync is disabled for this profile.' });
+  }
+
+  const blob = typeof req.body.blob === 'string' ? req.body.blob : null;
+  if (!blob) return res.status(400).json({ message: 'blob is required' });
+  // ~1 MB ceiling: cookie jars are small; anything larger is a bug or abuse.
+  if (blob.length > 1024 * 1024) {
+    return res.status(413).json({ message: 'Session data too large' });
+  }
+
+  user.sessionBlob = blob;
+  user.sessionVersion = (user.sessionVersion || 0) + 1;
+  user.sessionUpdatedAt = Date.now();
+  save();
+  res.json({ ok: true, version: user.sessionVersion });
+});
+
+app.post('/api/admin/users/:id/sessions/clear', requireAdmin, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.params.id);
+  if (!user) return res.status(404).json({ message: 'User not found.' });
+  user.sessionBlob = null;
+  user.sessionVersion = (user.sessionVersion || 0) + 1;
+  user.sessionUpdatedAt = Date.now();
+  save();
+  res.json({ ok: true });
+});
+
 app.get('/api/health', (_req, res) => {
   const d = db();
   res.json({ ok: true, users: d.users.length, time: Date.now() });
@@ -1258,4 +1381,3 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`SMVS Browser server listening on port ${PORT}`);
 });
-
