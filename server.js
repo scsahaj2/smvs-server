@@ -1069,6 +1069,19 @@ function publicUser(u) {
   return { ...rest, hasSyncedSession: !!u.sessionBlob };
 }
 
+/**
+ * Builds the policy sent to a device.
+ *
+ * IMPORTANT: `features` is merged over `defaultFeatures()` rather than used
+ * as-is. Profiles created by older builds were stored with
+ * `allowThirdPartyCookies: false`, and federated sign-in (Google, Microsoft,
+ * most SSO) cannot work without third-party cookies — the browser is bounced
+ * back to the login page and Google reports "CookieMismatch".
+ *
+ * Simply changing the default was not enough: existing records still carried
+ * the old value. Merging repairs them on read, and `migrateFeatures()` below
+ * repairs them on disk.
+ */
 function policyOf(u) {
   return {
     mode: u.mode || 'category',
@@ -1077,7 +1090,7 @@ function policyOf(u) {
     categoryRules: u.categoryRules || {},
     uncategorizedAction: u.uncategorizedAction || 'alert',
     timeRules: u.timeRules || [],
-    features: u.features || defaultFeatures(),
+    features: { ...defaultFeatures(), ...(u.features || {}) },
     homeUrl: u.homeUrl || 'https://www.wikipedia.org/'
   };
 }
@@ -1125,6 +1138,34 @@ function deviceAuth(req, res, next) {
 }
 
 // ---------------------------------------------------------------- seeding
+
+/**
+ * One-time repair of profiles written by older builds.
+ *
+ * Third-party cookies were originally defaulted to false. That silently broke
+ * every federated sign-in (Google/Microsoft/SSO) for profiles created before
+ * the default changed. Flip only that flag, and only where it is still false,
+ * so an administrator who deliberately disables it later is not overridden on
+ * every restart.
+ */
+function migrateFeatures() {
+  const d = db();
+  let changed = 0;
+
+  for (const u of d.users) {
+    u.features = { ...defaultFeatures(), ...(u.features || {}) };
+    if (u.features.allowThirdPartyCookies === false && !u.thirdPartyCookiesMigrated) {
+      u.features.allowThirdPartyCookies = true;
+      u.thirdPartyCookiesMigrated = true;   // never force it again
+      changed++;
+    }
+  }
+
+  if (changed) {
+    console.log(`[migrate] enabled third-party cookies for ${changed} profile(s) so sign-in works`);
+    flush();
+  }
+}
 
 function seed() {
   const d = db();
@@ -1177,6 +1218,7 @@ function seed() {
   if (changed) flush();
 }
 seed();
+migrateFeatures();
 
 // ---------------------------------------------------------------- device API
 
