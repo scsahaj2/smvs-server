@@ -47,7 +47,8 @@ const DEFAULT_DB = {
   admins: [],       // dashboard logins
   users: [],        // browser profiles (Qustodio "profiles")
   activity: [],     // blocked / alerted visits reported by devices
-  devices: []       // which phone last synced which user
+  devices: [],      // which phone last synced which user
+  appVersion: null  // latest published APK for auto-update
 };
 
 let cache = null;
@@ -389,6 +390,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="tabs">
       <button id="tabUsersBtn" class="active" onclick="showTab('users')">Users</button>
       <button id="tabActivityBtn" onclick="showTab('activity')">Activity Log</button>
+      <button id="tabUpdateBtn" onclick="showTab('update')">App Update</button>
       <button class="primary" style="margin-left:auto" onclick="openEditor(null)">+ Add User</button>
     </div>
 
@@ -401,6 +403,54 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <tbody id="userRows"></tbody>
       </table>
       <p id="noUsers" class="muted hidden">No users yet — click "Add User".</p>
+    </div>
+
+    <div id="tabUpdate" class="card hidden">
+      <h3 style="margin-top:0;color:var(--primary)">Publish an app update</h3>
+      <p class="muted">
+        Phones check this on every launch and every time the app is reopened.
+        When the version here is higher than the version on the phone, the new
+        APK downloads automatically in the background.
+      </p>
+      <div class="banner">
+        <b>One tap is unavoidable.</b> Android only lets system apps install
+        updates with no confirmation at all. The phone will show a single
+        "Update?" screen once the download finishes. Everything before that is
+        automatic, and a mandatory update blocks browsing until it is applied.
+      </div>
+
+      <div id="currentVersionBox" class="hidden"
+           style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
+        <b>Currently published</b>
+        <div id="currentVersionText" class="muted" style="margin-top:6px"></div>
+        <button class="danger" style="margin-top:10px;font-size:12px"
+                onclick="unpublishVersion()">Unpublish</button>
+      </div>
+
+      <div class="row">
+        <div>
+          <label>Version code (whole number, must increase)</label>
+          <input id="uVersionCode" type="number" min="1" placeholder="8">
+        </div>
+        <div>
+          <label>Version name (shown to users)</label>
+          <input id="uVersionName" placeholder="5.1">
+        </div>
+      </div>
+      <label>APK download link (direct link ending in .apk)</label>
+      <input id="uApkUrl" placeholder="https://github.com/you/repo/releases/download/v5.1/app.apk">
+      <label>What changed (optional)</label>
+      <input id="uNotes" placeholder="Fixed login issue">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <input type="checkbox" id="uMandatory" checked style="width:auto">
+        <span style="color:var(--text);font-size:14px">
+          Mandatory — block browsing until the user updates
+        </span>
+      </label>
+      <p id="updateErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
+      <button class="primary" style="margin-top:16px" onclick="publishVersion()">
+        Publish update to all phones
+      </button>
     </div>
 
     <div id="tabActivity" class="card hidden">
@@ -670,8 +720,61 @@ function esc(s) {
 function showTab(which) {
   $('tabUsers').classList.toggle('hidden', which !== 'users');
   $('tabActivity').classList.toggle('hidden', which !== 'activity');
+  $('tabUpdate').classList.toggle('hidden', which !== 'update');
   $('tabUsersBtn').classList.toggle('active', which === 'users');
   $('tabActivityBtn').classList.toggle('active', which === 'activity');
+  $('tabUpdateBtn').classList.toggle('active', which === 'update');
+  if (which === 'update') loadVersion();
+}
+
+async function loadVersion() {
+  try {
+    const d = await api('/api/admin/app/version');
+    const v = d.appVersion;
+    const box = $('currentVersionBox');
+    if (!v) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    $('currentVersionText').innerHTML =
+      'Version <b>' + esc(v.versionName || v.versionCode) + '</b> (code ' + v.versionCode + ')<br>' +
+      esc(v.apkUrl) + '<br>' +
+      (v.mandatory ? 'Mandatory' : 'Optional') +
+      ' &middot; published ' + new Date(v.publishedAt).toLocaleString();
+    $('uVersionCode').value = v.versionCode + 1;
+    $('uVersionName').value = '';
+    $('uApkUrl').value = v.apkUrl;
+    $('uMandatory').checked = v.mandatory !== false;
+  } catch (e) { /* non-fatal */ }
+}
+
+async function publishVersion() {
+  const err = $('updateErr');
+  err.classList.add('hidden');
+  try {
+    await api('/api/admin/app/version', {
+      method: 'POST',
+      body: JSON.stringify({
+        versionCode: parseInt($('uVersionCode').value, 10),
+        versionName: $('uVersionName').value.trim(),
+        apkUrl: $('uApkUrl').value.trim(),
+        notes: $('uNotes').value.trim(),
+        mandatory: $('uMandatory').checked
+      })
+    });
+    toast('Published — phones will pick it up on next launch');
+    await loadVersion();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+  }
+}
+
+async function unpublishVersion() {
+  if (!confirm('Stop offering this update?')) return;
+  try {
+    await api('/api/admin/app/version', { method: 'DELETE' });
+    $('currentVersionBox').classList.add('hidden');
+    toast('Unpublished');
+  } catch (e) { alert(e.message); }
 }
 
 // ------------------------------------------------------------------ editor
@@ -1369,6 +1472,79 @@ app.post('/api/admin/users/:id/sessions/clear', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ===================================================================
+// SECTION 5c — app auto-update
+// ===================================================================
+//
+// The device polls /api/app/version on every launch and every resume. When the
+// server advertises a higher versionCode, the app downloads the APK in the
+// background and installs it.
+//
+// HONEST LIMITATION: Android does not allow a normally-installed (sideloaded)
+// app to install an update with zero taps. Only system apps or a Device Owner
+// can do that. The user therefore sees ONE system confirmation screen at the
+// end. Everything before it — checking, downloading, verifying — is automatic,
+// and the update can be made mandatory so the app is unusable until it is
+// applied.
+//
+// Upload flow for the admin:
+//   1. build the new APK
+//   2. host it anywhere public (GitHub Release, Drive direct link, your server)
+//   3. POST the versionCode / versionName / URL here
+
+app.get('/api/app/version', (req, res) => {
+  const d = db();
+  const info = d.appVersion || null;
+  if (!info || !info.versionCode) {
+    return res.json({ available: false });
+  }
+  res.json({
+    available: true,
+    versionCode: info.versionCode,
+    versionName: info.versionName || '',
+    apkUrl: info.apkUrl || '',
+    mandatory: info.mandatory !== false,
+    notes: info.notes || '',
+    publishedAt: info.publishedAt || 0
+  });
+});
+
+app.get('/api/admin/app/version', requireAdmin, (_req, res) => {
+  res.json({ appVersion: db().appVersion || null });
+});
+
+app.post('/api/admin/app/version', requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const code = parseInt(b.versionCode, 10);
+
+  if (!Number.isInteger(code) || code < 1) {
+    return res.status(400).json({ message: 'versionCode must be a whole number.' });
+  }
+  const url = String(b.apkUrl || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    return res.status(400).json({ message: 'apkUrl must start with http:// or https://' });
+  }
+
+  const d = db();
+  d.appVersion = {
+    versionCode: code,
+    versionName: String(b.versionName || '').trim(),
+    apkUrl: url,
+    mandatory: b.mandatory !== false,
+    notes: String(b.notes || '').trim().slice(0, 500),
+    publishedAt: Date.now()
+  };
+  save();
+  res.json({ ok: true, appVersion: d.appVersion });
+});
+
+app.delete('/api/admin/app/version', requireAdmin, (_req, res) => {
+  const d = db();
+  d.appVersion = null;
+  save();
+  res.json({ ok: true });
+});
+
 app.get('/api/health', (_req, res) => {
   const d = db();
   res.json({ ok: true, users: d.users.length, time: Date.now() });
@@ -1381,3 +1557,4 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`SMVS Browser server listening on port ${PORT}`);
 });
+
