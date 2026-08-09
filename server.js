@@ -48,7 +48,8 @@ const DEFAULT_DB = {
   users: [],        // browser profiles (Qustodio "profiles")
   activity: [],     // blocked / alerted visits reported by devices
   devices: [],      // which phone last synced which user
-  appVersion: null  // latest published APK for auto-update
+  appVersion: null, // latest published APK for auto-update
+  roles: []         // custom roles created by the administrator
 };
 
 let cache = null;
@@ -170,6 +171,71 @@ const ROLE_TEMPLATES = {
 };
 
 /** Builds a full categoryRules map for a role. */
+/**
+ * The four roles every installation starts with.
+ *
+ * They are seeded into the database as ordinary records, so an administrator
+ * can rename them, change their rules, or ignore them entirely and build their
+ * own. `builtIn` only prevents deletion — everything else is editable.
+ */
+function builtInRoles() {
+  return ['admin', 'staff', 'student', 'guest'].map(id => {
+    const t = templateFor(id);
+    return {
+      id,
+      label: id.charAt(0).toUpperCase() + id.slice(1),
+      description: {
+        admin: 'Full access, can manage users from the dashboard',
+        staff: 'Work and research sites, most leisure content is watched',
+        student: 'Education and reference only',
+        guest: 'Reference sites only'
+      }[id] || '',
+      builtIn: true,
+      categoryRules: t.rules,
+      uncategorizedAction: t.rules.uncategorized || 'alert',
+      features: defaultFeatures(),
+      homeUrl: t.homeUrl,
+      createdAt: Date.now()
+    };
+  });
+}
+
+/** Looks up a role record by id. Returns null when unknown. */
+function findRole(id) {
+  return db().roles.find(r => r.id === String(id)) || null;
+}
+
+/**
+ * Rules to apply to a newly created user of this role.
+ * Falls back to the legacy template when the role has no record yet.
+ */
+function rulesForRole(id) {
+  const role = findRole(id);
+  if (role) {
+    return {
+      rules: role.categoryRules || {},
+      homeUrl: role.homeUrl || 'https://www.wikipedia.org/',
+      features: { ...defaultFeatures(), ...(role.features || {}) },
+      uncategorizedAction: role.uncategorizedAction || 'alert'
+    };
+  }
+  const t = templateFor(id);
+  return {
+    rules: t.rules, homeUrl: t.homeUrl,
+    features: defaultFeatures(),
+    uncategorizedAction: t.rules.uncategorized || 'alert'
+  };
+}
+
+/** A role id must be safe to use as an object key and in a URL. */
+function normaliseRoleId(raw) {
+  return String(raw || '')
+    .toLowerCase().trim()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+}
+
 function templateFor(role) {
   const t = ROLE_TEMPLATES[role] || ROLE_TEMPLATES.student;
   const rules = {};
@@ -344,6 +410,80 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
          background:var(--primary);color:#fff;padding:12px 22px;border-radius:8px;
          z-index:99;box-shadow:0 3px 12px rgba(0,0,0,.25)}
+
+  /* ===== redesigned rules editor ===== */
+  .modal .card{max-width:920px;padding:0;overflow:hidden}
+  .sheet-head{position:sticky;top:0;z-index:5;background:var(--primary);color:#fff;
+              padding:18px 24px;display:flex;align-items:center;justify-content:space-between}
+  .sheet-head h3{margin:0;font-size:18px;color:#fff}
+  .sheet-head .close{background:rgba(255,255,255,.15);border:0;color:#fff;
+                     width:32px;height:32px;border-radius:8px;font-size:18px;line-height:1}
+  .sheet-body{padding:22px 24px;max-height:calc(100vh - 230px);overflow-y:auto}
+  .sheet-foot{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--border);
+              padding:14px 24px;display:flex;gap:10px;justify-content:flex-end}
+
+  .steps{display:flex;gap:6px;margin:0 0 20px;border-bottom:1px solid var(--border)}
+  .steps button{border:0;border-radius:0;background:none;padding:11px 16px;
+                font-size:13px;color:var(--muted);border-bottom:2px solid transparent}
+  .steps button.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+  .step-panel{display:none}
+  .step-panel.on{display:block}
+
+  .cat-toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+               position:sticky;top:0;background:#fff;padding:10px 0;z-index:2;
+               border-bottom:1px solid var(--border);margin-bottom:6px}
+  .cat-search{flex:1;min-width:180px}
+  .quick{display:flex;gap:6px}
+  .quick button{font-size:11px;padding:7px 12px;border-radius:20px}
+  .quick button.allow-all:hover{background:#E8F5EC;border-color:var(--ok);color:var(--ok)}
+  .quick button.block-all:hover{background:#FDECEA;border-color:var(--danger);color:var(--danger)}
+
+  .cat-group h4{display:flex;align-items:center;gap:8px;margin:18px 0 8px;
+                font-size:11px;color:var(--primary);text-transform:uppercase;letter-spacing:.05em}
+  .cat-group h4::after{content:'';flex:1;height:1px;background:var(--border)}
+
+  .cat{display:flex;align-items:center;justify-content:space-between;gap:12px;
+       padding:11px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:7px;
+       transition:border-color .15s,box-shadow .15s;background:#fff}
+  .cat:hover{border-color:#B9C6DA;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+  .cat.is-block{border-left:3px solid var(--danger)}
+  .cat.is-alert{border-left:3px solid var(--warn)}
+  .cat.is-allow{border-left:3px solid var(--ok)}
+  .cat-info{min-width:0}
+  .cat-name{font-size:13.5px;font-weight:600}
+  .cat-desc{font-size:11.5px;color:var(--muted);margin-top:2px}
+
+  .seg{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex-shrink:0}
+  .seg button{border:0;border-radius:0;padding:7px 14px;font-size:11.5px;background:#fff;
+              color:var(--muted);font-weight:600;transition:background .12s}
+  .seg button:hover{background:var(--bg)}
+  .seg button.on-allow{background:var(--ok);color:#fff}
+  .seg button.on-alert{background:var(--warn);color:#fff}
+  .seg button.on-block{background:var(--danger);color:#fff}
+
+  .summary-bar{display:flex;gap:8px;margin-bottom:4px}
+  .pill{font-size:11px;padding:5px 11px;border-radius:20px;font-weight:600}
+  .pill.a{background:#E8F5EC;color:var(--ok)}
+  .pill.w{background:#FFF6E5;color:#8A6D00}
+  .pill.b{background:#FDECEA;color:var(--danger)}
+
+  .switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .switch-card{display:flex;align-items:flex-start;gap:10px;padding:12px;
+               border:1px solid var(--border);border-radius:10px}
+  .switch-card input{width:auto;margin-top:2px}
+  .switch-card b{font-size:13px;display:block}
+  .switch-card span{font-size:11.5px;color:var(--muted)}
+
+  .role-card{border:1px solid var(--border);border-radius:12px;padding:16px;
+             display:flex;justify-content:space-between;align-items:flex-start;gap:14px;
+             margin-bottom:10px;transition:box-shadow .15s}
+  .role-card:hover{box-shadow:0 2px 10px rgba(0,0,0,.07)}
+  .role-title{font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+  .role-desc{font-size:12.5px;color:var(--muted);margin-top:3px}
+  .role-meta{font-size:11.5px;color:var(--muted);margin-top:8px;display:flex;gap:10px;flex-wrap:wrap}
+  .tag{font-size:10px;padding:2px 8px;border-radius:10px;background:var(--bg);color:var(--muted);
+       font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+  .tag.built{background:#E8EEFB;color:var(--primary)}
 </style>
 </head>
 <body>
@@ -390,6 +530,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="tabs">
       <button id="tabUsersBtn" class="active" onclick="showTab('users')">Users</button>
       <button id="tabActivityBtn" onclick="showTab('activity')">Activity Log</button>
+      <button id="tabRolesBtn" onclick="showTab('roles')">Roles</button>
       <button id="tabUpdateBtn" onclick="showTab('update')">App Update</button>
       <button class="primary" style="margin-left:auto" onclick="openEditor(null)">+ Add User</button>
     </div>
@@ -403,6 +544,20 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <tbody id="userRows"></tbody>
       </table>
       <p id="noUsers" class="muted hidden">No users yet — click "Add User".</p>
+    </div>
+
+    <div id="tabRoles" class="card hidden">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div>
+          <h3 style="margin:0;color:var(--primary)">Roles</h3>
+          <p class="muted" style="margin:4px 0 0">
+            A role is a reusable set of rules. Create your own to match how your
+            organisation actually works.
+          </p>
+        </div>
+        <button class="primary" onclick="openRoleEditor(null)">+ New Role</button>
+      </div>
+      <div id="roleList" style="margin-top:16px"></div>
     </div>
 
     <div id="tabUpdate" class="card hidden">
@@ -466,104 +621,157 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <!-- ============ USER EDITOR ============ -->
 <div id="editorModal" class="modal hidden">
   <div class="card">
-    <h3 id="editorTitle" style="margin-top:0;color:var(--primary)">Add User</h3>
+    <div class="sheet-head">
+      <h3 id="editorTitle">Add User</h3>
+      <button class="close" onclick="closeEditor()">&times;</button>
+    </div>
 
-    <div class="row">
-      <div>
-        <label>Username (used to sign in)</label>
-        <input id="fUsername">
+    <div class="sheet-body">
+      <div class="steps">
+        <button type="button" class="on" data-step="account" onclick="showStep('account')">1 · Account</button>
+        <button type="button" data-step="rules" onclick="showStep('rules')">2 · Website Rules</button>
+        <button type="button" data-step="time" onclick="showStep('time')">3 · Time Limits</button>
+        <button type="button" data-step="perms" onclick="showStep('perms')">4 · Permissions</button>
       </div>
-      <div>
-        <label>Full name</label>
-        <input id="fDisplayName">
-      </div>
-    </div>
-    <div class="row">
-      <div>
-        <label>Email</label>
-        <input id="fEmail">
-      </div>
-      <div>
-        <label id="fPassLabel">Password</label>
-        <input id="fPassword" type="text" placeholder="min 4 characters">
-      </div>
-    </div>
-    <div class="row">
-      <div>
-        <label>Role</label>
-        <select id="fRole" onchange="applyTemplate()">
-          <option value="student">Student</option>
-          <option value="staff">Staff</option>
-          <option value="admin">Administrator</option>
-          <option value="guest">Guest</option>
-        </select>
-      </div>
-      <div>
-        <label>Home page</label>
-        <input id="fHome" value="https://www.wikipedia.org/">
-      </div>
-    </div>
-    <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-      <input type="checkbox" id="fEnabled" checked style="width:auto">
-      <span style="color:var(--text);font-size:14px">Account enabled (can sign in)</span>
-    </label>
 
-    <div style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg)">
-      <label style="display:flex;align-items:flex-start;gap:8px;margin:0">
-        <input type="checkbox" id="fSyncSessions" style="width:auto;margin-top:3px">
+      <!-- STEP 1 -->
+      <div class="step-panel on" id="stepAccount">
+        <div class="row">
+          <div><label>Username (used to sign in)</label><input id="fUsername"></div>
+          <div><label>Full name</label><input id="fDisplayName"></div>
+        </div>
+        <div class="row">
+          <div><label>Email</label><input id="fEmail"></div>
+          <div><label id="fPassLabel">Password</label><input id="fPassword" type="text" placeholder="min 4 characters"></div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Role</label>
+            <select id="fRole" onchange="onRoleChanged()"></select>
+            <p class="muted" style="margin-top:6px">Picking a role fills in its rules. You can still adjust them per user.</p>
+          </div>
+          <div><label>Home page</label><input id="fHome" value="https://www.wikipedia.org/"></div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+          <input type="checkbox" id="fEnabled" checked style="width:auto">
+          <span style="color:var(--text);font-size:14px">Account enabled (can sign in)</span>
+        </label>
+
+        <div style="margin-top:14px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--bg)">
+          <label style="display:flex;align-items:flex-start;gap:8px;margin:0">
+            <input type="checkbox" id="fSyncSessions" style="width:auto;margin-top:3px">
+            <span style="color:var(--text);font-size:14px">
+              <b>Share website logins across this profile's devices</b><br>
+              <span class="muted">Sign in on one device and the others are signed in too.</span>
+            </span>
+          </label>
+          <p class="muted" style="margin:8px 0 0;color:#8A6D00">
+            &#9888; These are live login sessions. Turn this on only for profiles you trust.
+          </p>
+          <button id="btnClearSessions" class="danger hidden"
+                  style="margin-top:10px;font-size:12px" onclick="clearSessions()">
+            Clear saved website logins
+          </button>
+        </div>
+      </div>
+
+      <!-- STEP 2 -->
+      <div class="step-panel" id="stepRules">
+        <div class="cat-toolbar">
+          <input id="catSearch" class="cat-search" placeholder="Search categories…" oninput="renderCats()">
+          <div class="quick">
+            <button class="allow-all" onclick="setAllCats('allow')">Allow all</button>
+            <button onclick="setAllCats('alert')">Alert all</button>
+            <button class="block-all" onclick="setAllCats('block')">Block all</button>
+          </div>
+        </div>
+        <div class="summary-bar" id="catSummary"></div>
+        <div id="catList"></div>
+
+        <h4 style="margin:22px 0 6px;color:var(--primary);font-size:13px">Specific site overrides</h4>
+        <p class="muted" style="margin:0 0 8px">One per line. These beat the category rules above.</p>
+        <label>Always ALLOW</label>
+        <textarea id="fAllowed" placeholder="wikipedia.org&#10;khanacademy.org"></textarea>
+        <label>Always BLOCK (highest priority)</label>
+        <textarea id="fBlocked" placeholder="facebook.com"></textarea>
+      </div>
+
+      <!-- STEP 3 -->
+      <div class="step-panel" id="stepTime">
+        <p class="muted" style="margin-bottom:12px">
+          Allow a site <b>only</b> during these hours. Outside the window it is blocked,
+          even if its category is allowed.
+        </p>
+        <div id="timeRules"></div>
+        <button onclick="addTimeRule()" style="font-size:13px;margin-top:6px">+ Add time rule</button>
+      </div>
+
+      <!-- STEP 4 -->
+      <div class="step-panel" id="stepPerms">
+        <div class="switch-grid" id="permGrid"></div>
+      </div>
+
+      <p id="editorErr" class="hidden" style="color:var(--danger);font-size:13px;margin-top:14px"></p>
+    </div>
+
+    <div class="sheet-foot">
+      <button onclick="closeEditor()">Cancel</button>
+      <button class="primary" onclick="saveUser()">Save User</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ROLE EDITOR ============ -->
+<div id="roleModal" class="modal hidden">
+  <div class="card">
+    <div class="sheet-head">
+      <h3 id="roleTitle">New Role</h3>
+      <button class="close" onclick="closeRoleEditor()">&times;</button>
+    </div>
+
+    <div class="sheet-body">
+      <div class="row">
+        <div><label>Role name</label><input id="rLabel" placeholder="e.g. Teacher, Class 10, Accounts"></div>
+        <div><label>Home page</label><input id="rHome" value="https://www.wikipedia.org/"></div>
+      </div>
+      <label>Description (optional)</label>
+      <input id="rDesc" placeholder="Who is this role for?">
+
+      <div id="rCopyWrap">
+        <label>Start from an existing role</label>
+        <select id="rCopyFrom"></select>
+      </div>
+
+      <h4 style="margin:20px 0 6px;color:var(--primary);font-size:13px">Default website rules</h4>
+      <p class="muted" style="margin:0 0 10px">
+        New users given this role start with these rules.
+      </p>
+      <div class="cat-toolbar">
+        <input id="rCatSearch" class="cat-search" placeholder="Search categories…" oninput="renderRoleCats()">
+        <div class="quick">
+          <button class="allow-all" onclick="setAllRoleCats('allow')">Allow all</button>
+          <button onclick="setAllRoleCats('alert')">Alert all</button>
+          <button class="block-all" onclick="setAllRoleCats('block')">Block all</button>
+        </div>
+      </div>
+      <div class="summary-bar" id="rCatSummary"></div>
+      <div id="rCatList"></div>
+
+      <label style="display:flex;align-items:flex-start;gap:8px;margin-top:18px;
+                    padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--bg)">
+        <input type="checkbox" id="rApplyExisting" style="width:auto;margin-top:3px">
         <span style="color:var(--text);font-size:14px">
-          <b>Share website logins across this profile's phones</b><br>
-          <span class="muted">
-            Sign in to a site on one phone and the profile's other phones are
-            signed in too. Logins survive switching SMVS users.
-          </span>
+          <b>Also apply to users who already have this role</b><br>
+          <span class="muted">Overwrites their current rules with these.</span>
         </span>
       </label>
-      <p class="muted" style="margin:8px 0 0;color:#8A6D00">
-        &#9888; These are live login sessions. Anyone with access to this server
-        could use them. Chrome deliberately does not sync cookies for this
-        reason. Turn this on only for profiles you trust on phones you control.
-      </p>
-      <button id="btnClearSessions" class="danger hidden"
-              style="margin-top:10px;font-size:12px" onclick="clearSessions()">
-        Clear saved website logins for this profile
-      </button>
+
+      <p id="roleErr" class="hidden" style="color:var(--danger);font-size:13px;margin-top:14px"></p>
     </div>
 
-    <hr style="margin:18px 0;border:0;border-top:1px solid var(--border)">
-
-    <h4 style="margin:0 0 4px;color:var(--primary)">Time-limited access</h4>
-    <p class="muted" style="margin:0 0 10px">
-      Allow a site <b>only</b> during these hours. Outside the window it is blocked,
-      even if its category is allowed.
-    </p>
-    <div id="timeRules"></div>
-    <button onclick="addTimeRule()" style="font-size:13px">+ Add time rule</button>
-
-    <hr style="margin:18px 0;border:0;border-top:1px solid var(--border)">
-
-    <h4 style="margin:0 0 4px;color:var(--primary)">Specific site overrides</h4>
-    <p class="muted" style="margin:0 0 8px">One per line. These beat category rules.</p>
-    <label>Always ALLOW</label>
-    <textarea id="fAllowed" placeholder="wikipedia.org&#10;khanacademy.org"></textarea>
-    <label>Always BLOCK (highest priority)</label>
-    <textarea id="fBlocked" placeholder="facebook.com"></textarea>
-
-    <hr style="margin:18px 0;border:0;border-top:1px solid var(--border)">
-
-    <h4 style="margin:0 0 4px;color:var(--primary)">Category rules</h4>
-    <div style="display:flex;gap:8px;margin:8px 0">
-      <button onclick="setAllCats('allow')" style="font-size:12px">Allow all</button>
-      <button onclick="setAllCats('alert')" style="font-size:12px">Alert all</button>
-      <button onclick="setAllCats('block')" style="font-size:12px">Block all</button>
-      <span id="catSummary" class="muted" style="margin-left:auto;align-self:center"></span>
-    </div>
-    <div id="catList"></div>
-
-    <p id="editorErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
-    <div style="display:flex;gap:10px;margin-top:20px">
-      <button onclick="closeEditor()" style="flex:1">Cancel</button>
-      <button class="primary" style="flex:2" onclick="saveUser()">Save User</button>
+    <div class="sheet-foot">
+      <button onclick="closeRoleEditor()">Cancel</button>
+      <button class="primary" onclick="saveRole()">Save Role</button>
     </div>
   </div>
 </div>
@@ -582,6 +790,10 @@ let USERS = [];
 let editing = null;                   // user being edited, or null for "new"
 let catState = {};                    // categoryId -> allow|alert|block
 let timeRules = [];
+let permState = {};                   // feature flag -> bool
+let ROLES = [];                       // role records from the server
+let editingRole = null;               // role being edited, or null for "new"
+let roleCatState = {};
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -659,6 +871,11 @@ async function boot() {
 // ------------------------------------------------------------------ data
 
 async function refresh() {
+  try {
+    ROLES = (await api('/api/admin/roles')).roles;
+  } catch { ROLES = []; }
+  fillRoleSelects();
+
   const data = await api('/api/admin/users');
   USERS = data.users;
   $('stTotal').textContent = data.stats.total;
@@ -683,7 +900,7 @@ function renderUsers() {
     const tr = document.createElement('tr');
     tr.innerHTML = \`
       <td><b>\${esc(u.username)}</b><br><span class="muted">\${esc(u.displayName || '')}</span></td>
-      <td><span class="badge b-neutral">\${esc(u.role)}</span></td>
+      <td><span class="badge b-neutral">\${esc((roleById(u.role) || {}).label || u.role)}</span></td>
       <td class="muted">\${blocked} blocked · \${alerted} alert</td>
       <td class="muted">\${(u.timeRules || []).length}</td>
       <td><span class="badge \${u.enabled ? 'b-ok' : 'b-off'}">\${u.enabled ? 'ACTIVE' : 'DISABLED'}</span></td>
@@ -712,19 +929,162 @@ function renderActivity(list) {
   }
 }
 
+// ---------------- roles ----------------
+
+function fillRoleSelects() {
+  const sel = $('fRole');
+  if (sel) {
+    const keep = sel.value;
+    sel.innerHTML = ROLES.map(r =>
+      \`<option value="\${esc(r.id)}">\${esc(r.label)}</option>\`).join('');
+    if (keep && ROLES.some(r => r.id === keep)) sel.value = keep;
+  }
+  const copy = $('rCopyFrom');
+  if (copy) {
+    copy.innerHTML = '<option value="">Blank (recommended defaults)</option>' +
+      ROLES.map(r => \`<option value="\${esc(r.id)}">\${esc(r.label)}</option>\`).join('');
+  }
+}
+
+function roleById(id) { return ROLES.find(r => r.id === id) || null; }
+
+function renderRoles() {
+  const host = $('roleList');
+  if (!host) return;
+  if (!ROLES.length) { host.innerHTML = '<p class="muted">No roles yet.</p>'; return; }
+
+  host.innerHTML = ROLES.map(r => {
+    const vals = Object.values(r.categoryRules || {});
+    const a = vals.filter(v => v === 'allow').length;
+    const w = vals.filter(v => v === 'alert').length;
+    const b = vals.filter(v => v === 'block').length;
+    return \`
+      <div class="role-card">
+        <div style="min-width:0">
+          <div class="role-title">\${esc(r.label)}
+            \${r.builtIn ? '<span class="tag built">built-in</span>' : '<span class="tag">custom</span>'}
+          </div>
+          \${r.description ? \`<div class="role-desc">\${esc(r.description)}</div>\` : ''}
+          <div class="role-meta">
+            <span class="pill a">\${a} allowed</span>
+            <span class="pill w">\${w} alert</span>
+            <span class="pill b">\${b} blocked</span>
+            <span>· \${r.userCount} user(s)</span>
+          </div>
+        </div>
+        <div style="white-space:nowrap;display:flex;gap:6px">
+          <button onclick="openRoleEditor('\${esc(r.id)}')">Edit</button>
+          \${r.builtIn ? '' :
+            \`<button class="danger" onclick="deleteRole('\${esc(r.id)}','\${esc(r.label)}')">Delete</button>\`}
+        </div>
+      </div>\`;
+  }).join('');
+}
+
+function openRoleEditor(id) {
+  editingRole = id ? roleById(id) : null;
+  $('roleTitle').textContent = editingRole ? \`Edit Role — \${editingRole.label}\` : 'New Role';
+  $('roleErr').classList.add('hidden');
+
+  $('rLabel').value = editingRole ? editingRole.label : '';
+  $('rDesc').value = editingRole ? (editingRole.description || '') : '';
+  $('rHome').value = editingRole ? (editingRole.homeUrl || '') : 'https://www.wikipedia.org/';
+  $('rApplyExisting').checked = false;
+  $('rCopyWrap').classList.toggle('hidden', !!editingRole);
+
+  if (editingRole && editingRole.categoryRules && Object.keys(editingRole.categoryRules).length) {
+    roleCatState = { ...editingRole.categoryRules };
+  } else {
+    roleCatState = {};
+    CATEGORIES.forEach(c => { roleCatState[c.id] = c.def; });
+  }
+  renderRoleCats();
+  $('roleModal').classList.remove('hidden');
+}
+
+function closeRoleEditor() { $('roleModal').classList.add('hidden'); }
+
+$('rCopyFrom') && $('rCopyFrom').addEventListener('change', e => {
+  const src = roleById(e.target.value);
+  if (!src) {
+    roleCatState = {};
+    CATEGORIES.forEach(c => { roleCatState[c.id] = c.def; });
+  } else {
+    roleCatState = { ...src.categoryRules };
+    $('rHome').value = src.homeUrl || '';
+  }
+  renderRoleCats();
+});
+
+function renderRoleCats() {
+  paintCats($('rCatList'), $('rCatSummary'), roleCatState,
+            ($('rCatSearch') || {}).value || '',
+            (id, action) => { roleCatState[id] = action; renderRoleCats(); });
+}
+
+function setAllRoleCats(action) {
+  CATEGORIES.forEach(c => { roleCatState[c.id] = action; });
+  renderRoleCats();
+}
+
+async function saveRole() {
+  const err = $('roleErr');
+  err.classList.add('hidden');
+  const label = $('rLabel').value.trim();
+  if (!label) { err.textContent = 'Please enter a role name.'; err.classList.remove('hidden'); return; }
+
+  const body = {
+    label,
+    description: $('rDesc').value.trim(),
+    homeUrl: $('rHome').value.trim(),
+    categoryRules: roleCatState,
+    uncategorizedAction: roleCatState['uncategorized'] || 'alert'
+  };
+
+  try {
+    if (editingRole) {
+      body.applyToExistingUsers = $('rApplyExisting').checked;
+      const r = await api('/api/admin/roles/' + editingRole.id,
+        { method: 'PUT', body: JSON.stringify(body) });
+      toast(r.usersUpdated ? \`Saved — \${r.usersUpdated} user(s) updated\` : 'Role saved');
+    } else {
+      body.copyFrom = $('rCopyFrom').value || null;
+      await api('/api/admin/roles', { method: 'POST', body: JSON.stringify(body) });
+      toast('Role created');
+    }
+    closeRoleEditor();
+    await refresh();
+    renderRoles();
+  } catch (e) {
+    err.textContent = e.message;
+    err.classList.remove('hidden');
+  }
+}
+
+async function deleteRole(id, label) {
+  if (!confirm(\`Delete the role "\${label}"?\`)) return;
+  try {
+    await api('/api/admin/roles/' + id, { method: 'DELETE' });
+    toast('Role deleted');
+    await refresh();
+    renderRoles();
+  } catch (e) { alert(e.message); }
+}
+
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function showTab(which) {
-  $('tabUsers').classList.toggle('hidden', which !== 'users');
-  $('tabActivity').classList.toggle('hidden', which !== 'activity');
-  $('tabUpdate').classList.toggle('hidden', which !== 'update');
-  $('tabUsersBtn').classList.toggle('active', which === 'users');
-  $('tabActivityBtn').classList.toggle('active', which === 'activity');
-  $('tabUpdateBtn').classList.toggle('active', which === 'update');
+  ['users','activity','roles','update'].forEach(t => {
+    const panel = $('tab' + t.charAt(0).toUpperCase() + t.slice(1));
+    const btn = $('tab' + t.charAt(0).toUpperCase() + t.slice(1) + 'Btn');
+    if (panel) panel.classList.toggle('hidden', which !== t);
+    if (btn) btn.classList.toggle('active', which === t);
+  });
   if (which === 'update') loadVersion();
+  if (which === 'roles') renderRoles();
 }
 
 async function loadVersion() {
@@ -791,7 +1151,8 @@ function openEditor(id) {
   $('fPassword').value = '';
   $('fPassLabel').textContent = editing
     ? 'New password (leave blank to keep current)' : 'Password';
-  $('fRole').value = editing ? editing.role : 'student';
+  fillRoleSelects();
+  $('fRole').value = editing ? editing.role : (ROLES[0] ? ROLES[0].id : 'student');
   $('fHome').value = editing ? (editing.homeUrl || '') : 'https://www.wikipedia.org/';
   $('fEnabled').checked = editing ? !!editing.enabled : true;
   $('fSyncSessions').checked = editing ? !!editing.syncWebSessions : false;
@@ -802,6 +1163,16 @@ function openEditor(id) {
 
   timeRules = editing ? JSON.parse(JSON.stringify(editing.timeRules || [])) : [];
   renderTimeRules();
+
+  // Feature switches: the user's own, or the chosen role's defaults.
+  const roleForPerms = roleById($('fRole').value);
+  permState = editing
+    ? { ...(editing.features || {}) }
+    : { ...(roleForPerms ? roleForPerms.features : {}) };
+  renderPerms();
+
+  if ($('catSearch')) $('catSearch').value = '';
+  showStep('account');
 
   if (editing && editing.categoryRules && Object.keys(editing.categoryRules).length) {
     catState = { ...editing.categoryRules };
@@ -816,68 +1187,119 @@ function openEditor(id) {
 
 function closeEditor() { $('editorModal').classList.add('hidden'); }
 
-function applyTemplate() {
-  if (editing) return;                       // don't stomp an existing user's rules
-  const role = $('fRole').value;
-  const presets = {
-    student: { allow: ['education','reference','government','search_engines','news','health','technology','sports','religion'],
-               alert: ['ai_tools','webmail','entertainment','shopping','uncategorized'] },
-    staff:   { allow: ['education','reference','government','search_engines','news','health','technology','business_finance','job_search','webmail','ai_tools','sports','travel','religion','forums_blogs','photo_video'],
-               alert: ['shopping','entertainment','streaming','social_networks','chat_messaging','file_sharing','uncategorized'] },
-    admin:   { allowAllExcept: ['pornography','self_harm','hate'] },
-    guest:   { allow: ['reference','education','government','search_engines'], blockRest: true }
-  };
-  const t = presets[role] || presets.student;
-  catState = {};
-  for (const c of CATEGORIES) {
-    if (t.allowAllExcept) catState[c.id] = t.allowAllExcept.includes(c.id) ? 'block' : 'allow';
-    else if (t.allow && t.allow.includes(c.id)) catState[c.id] = 'allow';
-    else if (t.alert && t.alert.includes(c.id)) catState[c.id] = 'alert';
-    else if (t.blockRest) catState[c.id] = 'block';
-    else catState[c.id] = c.def;
-  }
-  const homes = { student:'https://www.wikipedia.org/', staff:'https://www.google.com/',
-                  admin:'https://www.google.com/', guest:'https://www.wikipedia.org/' };
-  $('fHome').value = homes[role];
-  renderCats();
-}
 
-function renderCats() {
+/**
+ * Shared category renderer used by BOTH the user editor and the role editor.
+ *
+ * Draws each category as a card with a colour-coded left edge and an
+ * Allow/Alert/Block segmented control, grouped by theme and filterable.
+ */
+function paintCats(host, summaryHost, stateMap, filterText, onChange) {
+  if (!host) return;
+  const q = String(filterText || '').trim().toLowerCase();
+
   const groups = {};
-  for (const c of CATEGORIES) (groups[c.group] ||= []).push(c);
+  for (const c of CATEGORIES) {
+    if (q && !(c.label.toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q))) {
+      continue;
+    }
+    (groups[c.group] ||= []).push(c);
+  }
 
-  const host = $('catList');
   host.innerHTML = '';
-  for (const [group, cats] of Object.entries(groups)) {
+  const entries = Object.entries(groups);
+  if (!entries.length) {
+    host.innerHTML = '<p class="muted" style="padding:14px 0">No categories match that search.</p>';
+  }
+
+  for (const [group, cats] of entries) {
     const g = document.createElement('div');
     g.className = 'cat-group';
-    g.innerHTML = \`<h4>\${esc(group)}</h4>\`;
+    g.innerHTML = '<h4>' + esc(group) + '</h4>';
+
     for (const c of cats) {
-      const cur = catState[c.id] || c.def;
+      const cur = stateMap[c.id] || c.def;
       const row = document.createElement('div');
-      row.className = 'cat';
-      row.innerHTML = \`
-        <span class="cat-name">\${esc(c.label)}</span>
-        <span class="seg">
-          <button data-c="\${c.id}" data-a="allow" class="\${cur==='allow'?'on-allow':''}">Allow</button>
-          <button data-c="\${c.id}" data-a="alert" class="\${cur==='alert'?'on-alert':''}">Alert</button>
-          <button data-c="\${c.id}" data-a="block" class="\${cur==='block'?'on-block':''}">Block</button>
-        </span>\`;
+      row.className = 'cat is-' + cur;
+      row.innerHTML =
+        '<div class="cat-info">' +
+          '<div class="cat-name">' + esc(c.label) + '</div>' +
+          (c.description ? '<div class="cat-desc">' + esc(c.description) + '</div>' : '') +
+        '</div>' +
+        '<span class="seg">' +
+          '<button data-c="' + c.id + '" data-a="allow" class="' + (cur === 'allow' ? 'on-allow' : '') + '">Allow</button>' +
+          '<button data-c="' + c.id + '" data-a="alert" class="' + (cur === 'alert' ? 'on-alert' : '') + '">Alert</button>' +
+          '<button data-c="' + c.id + '" data-a="block" class="' + (cur === 'block' ? 'on-block' : '') + '">Block</button>' +
+        '</span>';
       g.appendChild(row);
     }
     host.appendChild(g);
   }
 
   host.querySelectorAll('button[data-c]').forEach(btn => {
-    btn.onclick = () => { catState[btn.dataset.c] = btn.dataset.a; renderCats(); };
+    btn.onclick = () => onChange(btn.dataset.c, btn.dataset.a);
   });
-  updateCatSummary();
+
+  if (summaryHost) {
+    const v = Object.values(stateMap);
+    summaryHost.innerHTML =
+      '<span class="pill a">' + v.filter(x => x === 'allow').length + ' allowed</span>' +
+      '<span class="pill w">' + v.filter(x => x === 'alert').length + ' alert</span>' +
+      '<span class="pill b">' + v.filter(x => x === 'block').length + ' blocked</span>';
+  }
 }
 
-function updateCatSummary() {
-  const v = Object.values(catState);
-  $('catSummary').textContent =
-    \`\${v.filter(x=>x==='allow').length} allowed · \${v.filter(x=>x==='alert').length} alert · \${v.filter(x=>x==='block').length} blocked\`;
+function renderCats() {
+  paintCats($('catList'), $('catSummary'), catState,
+            ($('catSearch') || {}).value || '',
+            (id, action) => { catState[id] = action; renderCats(); });
+}
+
+/** Step navigation inside the user editor. */
+function showStep(name) {
+  ['account', 'rules', 'time', 'perms'].forEach(sn => {
+    const panel = $('step' + sn.charAt(0).toUpperCase() + sn.slice(1));
+    if (panel) panel.classList.toggle('on', sn === name);
+  });
+  document.querySelectorAll('.steps button').forEach(b =>
+    b.classList.toggle('on', b.dataset.step === name));
+}
+
+/** Feature switches, rendered from one definition list. */
+const PERMS = [
+  ['forceHttps', 'Force HTTPS', 'Block insecure http:// sites'],
+  ['allowAddressBar', 'Allow typing addresses', 'Otherwise only links can be followed'],
+  ['allowDownloads', 'Allow downloads', 'Save files from websites'],
+  ['allowFileUpload', 'Allow file uploads', 'Send files to websites'],
+  ['allowJavaScript', 'Allow JavaScript', 'Most sites need this'],
+  ['allowThirdPartyCookies', 'Allow third-party cookies', 'Required for Google and other sign-ins'],
+  ['allowOpenInExternalApp', 'Allow opening other apps', 'mailto:, tel: links'],
+  ['safeBrowsingEnabled', 'Safe Browsing protection', 'Warns about malware and phishing']
+];
+
+function renderPerms() {
+  const host = $('permGrid');
+  if (!host) return;
+  host.innerHTML = PERMS.map(([key, title, desc]) =>
+    '<label class="switch-card">' +
+      '<input type="checkbox" data-perm="' + key + '"' + (permState[key] ? ' checked' : '') + '>' +
+      '<span><b>' + esc(title) + '</b><span>' + esc(desc) + '</span></span>' +
+    '</label>').join('');
+  host.querySelectorAll('input[data-perm]').forEach(cb => {
+    cb.onchange = () => { permState[cb.dataset.perm] = cb.checked; };
+  });
+}
+
+/** Applying a role fills the rule fields with that role's defaults. */
+function onRoleChanged() {
+  if (editing) return;              // never stomp an existing user's own rules
+  const role = roleById($('fRole').value);
+  if (!role) return;
+  catState = { ...role.categoryRules };
+  permState = { ...role.features };
+  $('fHome').value = role.homeUrl || '';
+  renderCats();
+  renderPerms();
 }
 
 function setAllCats(action) {
@@ -970,6 +1392,7 @@ async function saveUser() {
     categoryRules: catState,
     uncategorizedAction: catState['uncategorized'] || 'alert',
     timeRules,
+    features: permState,
     homeUrl: $('fHome').value.trim()
   };
   const pw = $('fPassword').value;
@@ -1183,6 +1606,12 @@ function seed() {
     changed = true;
   }
 
+  if (!Array.isArray(d.roles) || d.roles.length === 0) {
+    d.roles = builtInRoles();
+    console.log('[seed] created 4 built-in roles');
+    changed = true;
+  }
+
   if (d.users.length === 0) {
     for (const role of ['student', 'staff']) {
       const t = templateFor(role);
@@ -1345,8 +1774,8 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
     return res.status(409).json({ message: `Username "${username}" already exists.` });
   }
 
-  const role = ['admin', 'staff', 'student', 'guest'].includes(b.role) ? b.role : 'student';
-  const t = templateFor(role);
+  const role = findRole(b.role) ? String(b.role) : 'student';
+  const t = rulesForRole(role);
 
   const user = {
     id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1359,14 +1788,16 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
     mode: b.mode || 'category',
     allowedPatterns: b.allowedPatterns || [],
     blockedPatterns: b.blockedPatterns || [],
+    // A new user starts from their role's rules; anything sent explicitly
+    // in the request still wins, so the editor can override per user.
     categoryRules: b.categoryRules || t.rules,
-    uncategorizedAction: b.uncategorizedAction || 'alert',
+    uncategorizedAction: b.uncategorizedAction || t.uncategorizedAction,
     timeRules: (b.timeRules || []).map(scheduleUtil.normalise),
     syncWebSessions: b.syncWebSessions === true,
     sessionBlob: null,
     sessionVersion: 0,
     sessionUpdatedAt: 0,
-    features: { ...defaultFeatures(), ...(b.features || {}) },
+    features: { ...defaultFeatures(), ...t.features, ...(b.features || {}) },
     homeUrl: b.homeUrl || t.homeUrl,
     createdAt: Date.now(),
     lastLoginAt: 0,
@@ -1387,8 +1818,8 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
 
   if (b.displayName !== undefined) user.displayName = String(b.displayName).trim();
   if (b.email !== undefined) user.email = String(b.email).trim();
-  if (b.role !== undefined && ['admin', 'staff', 'student', 'guest'].includes(b.role)) {
-    user.role = b.role;
+  if (b.role !== undefined && findRole(b.role)) {
+    user.role = String(b.role);
   }
   if (b.enabled !== undefined) user.enabled = !!b.enabled;
   if (b.password) {
@@ -1434,6 +1865,115 @@ app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
   const idx = d.users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ message: 'User not found.' });
   d.users.splice(idx, 1);
+  save();
+  res.json({ ok: true });
+});
+
+// ---------------- roles ----------------
+//
+// Roles are records, not constants. An administrator can create "Teacher",
+// "Class 10", "Accounts" — whatever matches their organisation — and give each
+// one its own category rules, feature switches and home page. Creating a user
+// with that role copies those rules as the starting point.
+
+app.get('/api/admin/roles', requireAdmin, (_req, res) => {
+  const d = db();
+  const counts = {};
+  for (const u of d.users) counts[u.role] = (counts[u.role] || 0) + 1;
+  res.json({
+    roles: d.roles.map(r => ({ ...r, userCount: counts[r.id] || 0 }))
+  });
+});
+
+app.post('/api/admin/roles', requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const label = String(b.label || '').trim();
+  if (!label) return res.status(400).json({ message: 'Role name is required.' });
+
+  const id = normaliseRoleId(b.id || label);
+  if (!id) {
+    return res.status(400).json({ message: 'Role name must contain letters or numbers.' });
+  }
+
+  const d = db();
+  if (d.roles.some(r => r.id === id)) {
+    return res.status(409).json({ message: `A role called "${label}" already exists.` });
+  }
+
+  // Start from an existing role when asked, so building a variant is quick.
+  const basis = b.copyFrom ? findRole(b.copyFrom) : null;
+
+  const role = {
+    id,
+    label,
+    description: String(b.description || '').trim().slice(0, 200),
+    builtIn: false,
+    categoryRules: b.categoryRules || (basis ? { ...basis.categoryRules } : templateFor('student').rules),
+    uncategorizedAction: b.uncategorizedAction || (basis ? basis.uncategorizedAction : 'alert'),
+    features: { ...defaultFeatures(), ...(basis ? basis.features : {}), ...(b.features || {}) },
+    homeUrl: b.homeUrl || (basis ? basis.homeUrl : 'https://www.wikipedia.org/'),
+    createdAt: Date.now()
+  };
+
+  d.roles.push(role);
+  save();
+  res.status(201).json({ role });
+});
+
+app.put('/api/admin/roles/:id', requireAdmin, (req, res) => {
+  const role = findRole(req.params.id);
+  if (!role) return res.status(404).json({ message: 'Role not found.' });
+
+  const b = req.body || {};
+  if (b.label !== undefined) {
+    const label = String(b.label).trim();
+    if (!label) return res.status(400).json({ message: 'Role name cannot be empty.' });
+    role.label = label;
+  }
+  if (b.description !== undefined) role.description = String(b.description).trim().slice(0, 200);
+  if (b.categoryRules !== undefined) role.categoryRules = b.categoryRules;
+  if (b.uncategorizedAction !== undefined) role.uncategorizedAction = b.uncategorizedAction;
+  if (b.features !== undefined) role.features = { ...defaultFeatures(), ...b.features };
+  if (b.homeUrl !== undefined) role.homeUrl = b.homeUrl;
+
+  // Optionally push the new rules onto everyone already holding this role.
+  let updated = 0;
+  if (b.applyToExistingUsers) {
+    for (const u of db().users) {
+      if (u.role !== role.id) continue;
+      u.categoryRules = { ...role.categoryRules };
+      u.uncategorizedAction = role.uncategorizedAction;
+      u.features = { ...defaultFeatures(), ...role.features };
+      u.homeUrl = role.homeUrl;
+      updated++;
+    }
+  }
+
+  save();
+  res.json({ role, usersUpdated: updated });
+});
+
+app.delete('/api/admin/roles/:id', requireAdmin, (req, res) => {
+  const d = db();
+  const idx = d.roles.findIndex(r => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ message: 'Role not found.' });
+
+  const role = d.roles[idx];
+  if (role.builtIn) {
+    return res.status(400).json({
+      message: 'Built-in roles cannot be deleted. You can rename them or change their rules.'
+    });
+  }
+
+  // Refuse rather than silently orphaning accounts.
+  const inUse = d.users.filter(u => u.role === role.id).length;
+  if (inUse > 0) {
+    return res.status(409).json({
+      message: `${inUse} user(s) still have this role. Move them to another role first.`
+    });
+  }
+
+  d.roles.splice(idx, 1);
   save();
   res.json({ ok: true });
 });
@@ -1599,4 +2139,3 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`SMVS Browser server listening on port ${PORT}`);
 });
-
