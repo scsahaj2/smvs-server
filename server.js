@@ -191,7 +191,7 @@ function builtInRoles() {
         guest: 'Reference sites only'
       }[id] || '',
       builtIn: true,
-      categoryRules: t.rules,
+      categoryRules: completeCategoryRules(t.rules, t.rules),
       uncategorizedAction: t.rules.uncategorized || 'alert',
       features: defaultFeatures(),
       homeUrl: t.homeUrl,
@@ -648,7 +648,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <div>
             <label>Role</label>
             <select id="fRole" onchange="onRoleChanged()"></select>
-            <p class="muted" style="margin-top:6px">Picking a role fills in its rules. You can still adjust them per user.</p>
+            <p class="muted" style="margin-top:6px">
+              This user follows the role's rules automatically. Anything you change
+              below becomes an exception just for them.
+            </p>
           </div>
           <div><label>Home page</label><input id="fHome" value="https://www.wikipedia.org/"></div>
         </div>
@@ -757,14 +760,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div class="summary-bar" id="rCatSummary"></div>
       <div id="rCatList"></div>
 
-      <label style="display:flex;align-items:flex-start;gap:8px;margin-top:18px;
-                    padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--bg)">
-        <input type="checkbox" id="rApplyExisting" style="width:auto;margin-top:3px">
-        <span style="color:var(--text);font-size:14px">
-          <b>Also apply to users who already have this role</b><br>
-          <span class="muted">Overwrites their current rules with these.</span>
-        </span>
-      </label>
+      <div style="margin-top:18px;padding:13px 14px;border-radius:10px;
+                  background:#E8F5EC;border:1px solid #BFE3CB">
+        <b style="font-size:13.5px;color:#0B6B3A">Changes apply to everyone with this role</b>
+        <p class="muted" style="margin:4px 0 0;color:#2E6B48">
+          Saving updates every user who has this role — on phones and computers —
+          the next time they open the browser. Rules you customised for one
+          person individually are kept.
+        </p>
+        <input type="checkbox" id="rApplyExisting" checked style="display:none">
+      </div>
 
       <p id="roleErr" class="hidden" style="color:var(--danger);font-size:13px;margin-top:14px"></p>
     </div>
@@ -1505,16 +1510,105 @@ function publicUser(u) {
  * the old value. Merging repairs them on read, and `migrateFeatures()` below
  * repairs them on disk.
  */
+/**
+ * Builds the policy a device receives.
+ *
+ * ### Roles are LIVE, not a one-time copy
+ * The first version of the role feature copied a role's rules onto a user at
+ * creation time. Editing the role afterwards changed nothing for people who
+ * already had it — an administrator would block Entertainment on the "Mukto"
+ * role and the "stk" account would carry on browsing it. That is the opposite
+ * of what a role is for.
+ *
+ * Now the role is resolved on every read and layered underneath the user:
+ *
+ *     defaults  <  role  <  per-user overrides
+ *
+ * So a role edit reaches every holder immediately, while a deliberate
+ * per-user exception still wins. `userOverrides` records which keys were set
+ * for this specific person, so "student may use YouTube" survives a role edit
+ * but everything untouched keeps following the role.
+ */
+/**
+ * Works out which parts of a submitted user differ from their role.
+ *
+ * Only these are treated as per-user exceptions; everything else keeps
+ * following the role, so a later role edit reaches this account.
+ */
+function diffOverrides(body, roleRules) {
+  const ov = { categoryRules: [] };
+
+  if (body.categoryRules && roleRules && roleRules.rules) {
+    for (const [key, val] of Object.entries(body.categoryRules)) {
+      if (roleRules.rules[key] !== val) ov.categoryRules.push(key);
+    }
+  }
+  if (body.homeUrl !== undefined && body.homeUrl !== roleRules.homeUrl) {
+    ov.homeUrl = true;
+  }
+  if (body.uncategorizedAction !== undefined &&
+      body.uncategorizedAction !== roleRules.uncategorizedAction) {
+    ov.uncategorizedAction = true;
+  }
+  if (body.features) {
+    const base = roleRules.features || defaultFeatures();
+    if (Object.entries(body.features).some(([k, v]) => base[k] !== v)) {
+      ov.features = true;
+    }
+  }
+  return ov;
+}
+
 function policyOf(u) {
+  const role = findRole(u.role);
+  const ov = u.userOverrides || {};
+
+  // --- category rules: role first, then only the keys pinned to this user ---
+  const roleCats = (role && role.categoryRules) || {};
+  const userCats = u.categoryRules || {};
+  let categoryRules;
+
+  if (ov.categoryRules && ov.categoryRules.length) {
+    // Selected categories were customised for this user; keep just those.
+    categoryRules = { ...roleCats };
+    for (const key of ov.categoryRules) {
+      if (key in userCats) categoryRules[key] = userCats[key];
+    }
+  } else if (role) {
+    categoryRules = { ...roleCats };
+  } else {
+    // No role record (legacy data) — fall back to whatever the user has.
+    categoryRules = { ...userCats };
+  }
+
+  const pick = (field, fallback) => {
+    if (ov[field] && u[field] !== undefined) return u[field];      // user pinned
+    if (role && role[field] !== undefined) return role[field];      // role value
+    return u[field] !== undefined ? u[field] : fallback;
+  };
+
+  // Last line of defence: a category missing from the map would be treated as
+  // "allow" on the device. Fill any gap with the category's own default so a
+  // partial record can never silently unblock content.
+  for (const c of CATEGORIES) {
+    if (!categoryRules[c.id]) categoryRules[c.id] = c.def;
+  }
+
   return {
     mode: u.mode || 'category',
+    // Site lists and time rules are always per-user: they name specific
+    // websites, which is not something a shared role should dictate.
     allowedPatterns: u.allowedPatterns || [],
     blockedPatterns: u.blockedPatterns || [],
-    categoryRules: u.categoryRules || {},
-    uncategorizedAction: u.uncategorizedAction || 'alert',
     timeRules: u.timeRules || [],
-    features: { ...defaultFeatures(), ...(u.features || {}) },
-    homeUrl: u.homeUrl || 'https://www.wikipedia.org/'
+    categoryRules,
+    uncategorizedAction: pick('uncategorizedAction', 'alert'),
+    features: {
+      ...defaultFeatures(),
+      ...((role && role.features) || {}),
+      ...(ov.features ? (u.features || {}) : {})
+    },
+    homeUrl: pick('homeUrl', 'https://www.wikipedia.org/')
   };
 }
 
@@ -1788,10 +1882,12 @@ app.post('/api/admin/users', requireAdmin, (req, res) => {
     mode: b.mode || 'category',
     allowedPatterns: b.allowedPatterns || [],
     blockedPatterns: b.blockedPatterns || [],
-    // A new user starts from their role's rules; anything sent explicitly
-    // in the request still wins, so the editor can override per user.
+    // Rules are resolved from the role at read time (see policyOf). We store
+    // whatever was sent so a deliberate per-user exception can be kept, and
+    // record in `userOverrides` which fields were actually customised.
     categoryRules: b.categoryRules || t.rules,
     uncategorizedAction: b.uncategorizedAction || t.uncategorizedAction,
+    userOverrides: diffOverrides(b, t),
     timeRules: (b.timeRules || []).map(scheduleUtil.normalise),
     syncWebSessions: b.syncWebSessions === true,
     sessionBlob: null,
@@ -1819,7 +1915,13 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
   if (b.displayName !== undefined) user.displayName = String(b.displayName).trim();
   if (b.email !== undefined) user.email = String(b.email).trim();
   if (b.role !== undefined && findRole(b.role)) {
+    const changed = user.role !== String(b.role);
     user.role = String(b.role);
+    if (changed) {
+      // Overrides were relative to the OLD role; carrying them across would
+      // silently re-apply rules the admin never chose for the new role.
+      user.userOverrides = { categoryRules: [] };
+    }
   }
   if (b.enabled !== undefined) user.enabled = !!b.enabled;
   if (b.password) {
@@ -1856,6 +1958,20 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
     user.timeRules = cleaned;
   }
 
+  // Re-derive which fields are genuine per-user exceptions. Anything now
+  // matching the role stops being an override, so future role edits reach it.
+  const roleRules = rulesForRole(user.role);
+  user.userOverrides = diffOverrides(
+    {
+      categoryRules: b.categoryRules !== undefined ? b.categoryRules : undefined,
+      homeUrl: b.homeUrl !== undefined ? b.homeUrl : undefined,
+      uncategorizedAction:
+        b.uncategorizedAction !== undefined ? b.uncategorizedAction : undefined,
+      features: b.features !== undefined ? b.features : undefined
+    },
+    roleRules
+  );
+
   save();
   res.json({ user: publicUser(user) });
 });
@@ -1885,6 +2001,23 @@ app.get('/api/admin/roles', requireAdmin, (_req, res) => {
   });
 });
 
+/**
+ * Ensures a rule map covers every known category.
+ *
+ * A partial map is dangerous: any category the device does not find falls back
+ * to "allow", so a half-filled role silently unblocks things. The dashboard
+ * always sends all 37, but the API is public to the admin token and an
+ * incomplete PUT must not create a hole.
+ */
+function completeCategoryRules(partial, fallback) {
+  const base = fallback || {};
+  const out = {};
+  for (const c of CATEGORIES) {
+    out[c.id] = (partial && partial[c.id]) || base[c.id] || c.def;
+  }
+  return out;
+}
+
 app.post('/api/admin/roles', requireAdmin, (req, res) => {
   const b = req.body || {};
   const label = String(b.label || '').trim();
@@ -1908,7 +2041,10 @@ app.post('/api/admin/roles', requireAdmin, (req, res) => {
     label,
     description: String(b.description || '').trim().slice(0, 200),
     builtIn: false,
-    categoryRules: b.categoryRules || (basis ? { ...basis.categoryRules } : templateFor('student').rules),
+    categoryRules: completeCategoryRules(
+      b.categoryRules,
+      basis ? basis.categoryRules : templateFor('student').rules
+    ),
     uncategorizedAction: b.uncategorizedAction || (basis ? basis.uncategorizedAction : 'alert'),
     features: { ...defaultFeatures(), ...(basis ? basis.features : {}), ...(b.features || {}) },
     homeUrl: b.homeUrl || (basis ? basis.homeUrl : 'https://www.wikipedia.org/'),
@@ -1931,7 +2067,9 @@ app.put('/api/admin/roles/:id', requireAdmin, (req, res) => {
     role.label = label;
   }
   if (b.description !== undefined) role.description = String(b.description).trim().slice(0, 200);
-  if (b.categoryRules !== undefined) role.categoryRules = b.categoryRules;
+  if (b.categoryRules !== undefined) {
+    role.categoryRules = completeCategoryRules(b.categoryRules, role.categoryRules);
+  }
   if (b.uncategorizedAction !== undefined) role.uncategorizedAction = b.uncategorizedAction;
   if (b.features !== undefined) role.features = { ...defaultFeatures(), ...b.features };
   if (b.homeUrl !== undefined) role.homeUrl = b.homeUrl;
@@ -2139,3 +2277,4 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`SMVS Browser server listening on port ${PORT}`);
 });
+
