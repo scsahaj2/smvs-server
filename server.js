@@ -711,29 +711,52 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 onclick="unpublishVersion()">Unpublish</button>
       </div>
 
+      <h4 style="margin:18px 0 4px;color:var(--primary);font-size:13px">
+        &#128241; Android (phones and tablets)
+      </h4>
       <div class="row">
         <div>
           <label>Version code (whole number, must increase)</label>
-          <input id="uVersionCode" type="number" min="1" placeholder="8">
+          <input id="uVersionCode" type="number" min="1" placeholder="15">
         </div>
         <div>
           <label>Version name (shown to users)</label>
-          <input id="uVersionName" placeholder="5.1">
+          <input id="uVersionName" placeholder="6.1">
         </div>
       </div>
       <label>APK download link (direct link ending in .apk)</label>
-      <input id="uApkUrl" placeholder="https://github.com/you/repo/releases/download/v5.1/app.apk">
-      <label>What changed (optional)</label>
+      <input id="uApkUrl" placeholder="https://github.com/you/repo/releases/download/v6.1/app.apk">
+
+      <h4 style="margin:22px 0 4px;color:var(--primary);font-size:13px">
+        &#128187; Windows (computers)
+      </h4>
+      <div class="row">
+        <div>
+          <label>Desktop version (like 2.1.0)</label>
+          <input id="uDesktopVersion" placeholder="2.1.0">
+        </div>
+        <div>
+          <label>Installer link (direct link ending in .exe)</label>
+          <input id="uDesktopUrl" placeholder="https://…/SMVS-Browser-Setup-2.1.0.exe">
+        </div>
+      </div>
+      <p class="muted" style="margin-top:6px">
+        Computers download and install this by themselves — nobody has to run
+        the installer by hand. Leave both boxes empty to publish an Android-only
+        update.
+      </p>
+
+      <label style="margin-top:18px">What changed (optional)</label>
       <input id="uNotes" placeholder="Fixed login issue">
       <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
         <input type="checkbox" id="uMandatory" checked style="width:auto">
         <span style="color:var(--text);font-size:14px">
-          Mandatory — block browsing until the user updates
+          Mandatory — block browsing until the update is applied
         </span>
       </label>
       <p id="updateErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
       <button class="primary" style="margin-top:16px" onclick="publishVersion()">
-        Publish update to all phones
+        Publish update to all devices
       </button>
     </div>
 
@@ -1696,14 +1719,24 @@ async function loadVersion() {
     const box = $('currentVersionBox');
     if (!v) { box.classList.add('hidden'); return; }
     box.classList.remove('hidden');
-    $('currentVersionText').innerHTML =
-      'Version <b>' + esc(v.versionName || v.versionCode) + '</b> (code ' + v.versionCode + ')<br>' +
-      esc(v.apkUrl) + '<br>' +
-      (v.mandatory ? 'Mandatory' : 'Optional') +
-      ' &middot; published ' + new Date(v.publishedAt).toLocaleString();
-    $('uVersionCode').value = v.versionCode + 1;
+    const lines = [];
+    if (v.apkUrl) {
+      lines.push('&#128241; <b>Android</b> ' + esc(v.versionName || String(v.versionCode)) +
+        ' (code ' + v.versionCode + ')<br><span class="muted">' + esc(v.apkUrl) + '</span>');
+    }
+    if (v.desktopUrl) {
+      lines.push('&#128187; <b>Windows</b> ' + esc(v.desktopVersion) +
+        '<br><span class="muted">' + esc(v.desktopUrl) + '</span>');
+    }
+    lines.push((v.mandatory ? 'Mandatory' : 'Optional') +
+      ' &middot; published ' + new Date(v.publishedAt).toLocaleString());
+    $('currentVersionText').innerHTML = lines.join('<br><br>');
+
+    $('uVersionCode').value = v.versionCode ? v.versionCode + 1 : '';
     $('uVersionName').value = '';
-    $('uApkUrl').value = v.apkUrl;
+    $('uApkUrl').value = v.apkUrl || '';
+    $('uDesktopVersion').value = v.desktopVersion || '';
+    $('uDesktopUrl').value = v.desktopUrl || '';
     $('uMandatory').checked = v.mandatory !== false;
   } catch (e) { /* non-fatal */ }
 }
@@ -1718,11 +1751,14 @@ async function publishVersion() {
         versionCode: parseInt($('uVersionCode').value, 10),
         versionName: $('uVersionName').value.trim(),
         apkUrl: $('uApkUrl').value.trim(),
+        desktopVersion: $('uDesktopVersion').value.trim(),
+        desktopUrl: $('uDesktopUrl').value.trim(),
+        desktopMandatory: $('uMandatory').checked,
         notes: $('uNotes').value.trim(),
         mandatory: $('uMandatory').checked
       })
     });
-    toast('Published — phones will pick it up on next launch');
+    toast('Published — devices will pick it up automatically');
     await loadVersion();
   } catch (e) {
     err.textContent = e.message;
@@ -3140,14 +3176,25 @@ app.post('/api/admin/users/:id/sessions/clear', requireAdmin, (req, res) => {
 app.get('/api/app/version', (req, res) => {
   const d = db();
   const info = d.appVersion || null;
-  if (!info || !info.versionCode) {
+
+  // "Available" means either platform has something published. Gating on
+  // versionCode alone hid a desktop-only release from every laptop, because
+  // a Windows installer has no Android version code.
+  const hasAndroid = !!(info && info.versionCode && info.apkUrl);
+  const hasDesktop = !!(info && info.desktopUrl && info.desktopVersion);
+
+  if (!info || (!hasAndroid && !hasDesktop)) {
     return res.json({ available: false });
   }
+
   res.json({
     available: true,
-    versionCode: info.versionCode,
+    versionCode: info.versionCode || 0,
     versionName: info.versionName || '',
     apkUrl: info.apkUrl || '',
+    desktopUrl: info.desktopUrl || '',
+    desktopVersion: info.desktopVersion || '',
+    desktopMandatory: info.desktopMandatory !== false,
     mandatory: info.mandatory !== false,
     notes: info.notes || '',
     publishedAt: info.publishedAt || 0
@@ -3162,19 +3209,50 @@ app.post('/api/admin/app/version', requireAdmin, (req, res) => {
   const b = req.body || {};
   const code = parseInt(b.versionCode, 10);
 
-  if (!Number.isInteger(code) || code < 1) {
-    return res.status(400).json({ message: 'versionCode must be a whole number.' });
+  // Android and desktop are published together but validated apart: an
+  // administrator may well have a new APK ready before the Windows installer,
+  // and forcing both at once would block one platform on the other.
+  const apkUrl = String(b.apkUrl || '').trim();
+  const desktopUrl = String(b.desktopUrl || '').trim();
+  const desktopVersion = String(b.desktopVersion || '').trim();
+
+  if (!apkUrl && !desktopUrl) {
+    return res.status(400).json({
+      message: 'Provide at least one download link — Android APK or Windows installer.'
+    });
   }
-  const url = String(b.apkUrl || '').trim();
-  if (!/^https?:\/\//i.test(url)) {
-    return res.status(400).json({ message: 'apkUrl must start with http:// or https://' });
+
+  if (apkUrl) {
+    if (!Number.isInteger(code) || code < 1) {
+      return res.status(400).json({
+        message: 'versionCode must be a whole number when publishing an APK.'
+      });
+    }
+    if (!/^https?:\/\//i.test(apkUrl)) {
+      return res.status(400).json({ message: 'apkUrl must start with http:// or https://' });
+    }
+  }
+
+  if (desktopUrl) {
+    if (!/^https?:\/\//i.test(desktopUrl)) {
+      return res.status(400).json({ message: 'desktopUrl must start with http:// or https://' });
+    }
+    // The desktop updater compares dotted versions, so it needs one.
+    if (!/^\d+(\.\d+)*$/.test(desktopVersion)) {
+      return res.status(400).json({
+        message: 'Desktop version must look like 2.1.0 when publishing a Windows installer.'
+      });
+    }
   }
 
   const d = db();
   d.appVersion = {
-    versionCode: code,
+    versionCode: Number.isInteger(code) && code > 0 ? code : 0,
     versionName: String(b.versionName || '').trim(),
-    apkUrl: url,
+    apkUrl,
+    desktopUrl,
+    desktopVersion,
+    desktopMandatory: b.desktopMandatory !== false,
     mandatory: b.mandatory !== false,
     notes: String(b.notes || '').trim().slice(0, 500),
     publishedAt: Date.now()
