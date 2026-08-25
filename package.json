@@ -1,71 +1,20 @@
 {
-  "name": "smvs-browser-desktop",
-  "productName": "SMVS Browser",
-  "version": "2.1.0",
-  "description": "Managed, filtered browser for Windows, macOS and Linux",
-  "main": "src/main.js",
-  "author": {
-    "name": "SMVS",
-    "email": "admin@smvs.local"
-  },
-  "license": "UNLICENSED",
+  "name": "smvs-browser-server",
+  "version": "1.0.0",
+  "description": "Cloud backend + admin dashboard for SMVS Browser",
+  "main": "server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "electron .",
-    "test": "node --test test/",
-    "dist:win": "electron-builder --win --x64 --publish never",
-    "dist:linux": "electron-builder --linux --x64 --publish never",
-    "pack:win": "electron-packager . \"SMVS Browser\" --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --prune=true --ignore=\"^/test\" --ignore=\"^/dist\""
+    "start": "node server.js"
   },
-  "devDependencies": {
-    "electron": "31.7.7",
-    "@electron/packager": "18.3.6",
-    "electron-builder": "24.13.3"
+  "engines": {
+    "node": ">=18"
   },
-  "build": {
-    "appId": "com.arena.smvsbrowser",
-    "productName": "SMVS Browser",
-    "copyright": "SMVS",
-    "directories": {
-      "output": "release",
-      "buildResources": "assets"
-    },
-    "files": [
-      "src/**/*",
-      "renderer/**/*",
-      "assets/icon.*",
-      "package.json",
-      "!test/**",
-      "!release/**",
-      "!dist/**",
-      "!**/*.map"
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": ["x64"]
-        }
-      ],
-      "icon": "assets/icon.ico",
-      "artifactName": "SMVS-Browser-Setup-${version}.${ext}"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "SMVS Browser",
-      "installerIcon": "assets/icon.ico",
-      "uninstallerIcon": "assets/icon.ico",
-      "deleteAppDataOnUninstall": false,
-      "runAfterFinish": true
-    },
-    "linux": {
-      "target": ["AppImage"],
-      "category": "Network",
-      "icon": "assets/icon.png",
-      "artifactName": "SMVS-Browser-${version}.${ext}"
-    }
+  "dependencies": {
+    "express": "^4.19.2",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5",
+    "pg": "^8.13.1"
   }
 }
