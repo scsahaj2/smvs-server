@@ -727,6 +727,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <label>APK download link (direct link ending in .apk)</label>
       <input id="uApkUrl" placeholder="https://github.com/you/repo/releases/download/v6.1/app.apk">
 
+      <!--
+        The commonest support question was not "what does this field mean" but
+        "where do I get the link". Answering it inline removes the guesswork,
+        and naming the wrong-link trap saves a failed publish.
+      -->
+      <details style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--primary)">
+          Where do I get this link?
+        </summary>
+        <ol class="muted" style="margin:8px 0 0 18px;line-height:1.7">
+          <li>Open your GitHub repository &rarr; <b>Releases</b> &rarr;
+              <b>Create a new release</b></li>
+          <li>Give it a tag such as <code>v6.2</code> and publish it</li>
+          <li>Drag the <code>.apk</code> file into
+              <b>&ldquo;Attach binaries&rdquo;</b> and wait for the upload</li>
+          <li>Right-click the uploaded file &rarr; <b>Copy link address</b></li>
+          <li>Paste it above</li>
+        </ol>
+        <p class="muted" style="margin:8px 0 0">
+          &#9888; The link must contain <code>/releases/download/</code>.
+          A <code>/blob/</code> or <code>/releases/tag/</code> link points at a
+          web page, not the file, and the download will fail.
+        </p>
+      </details>
+
       <h4 style="margin:22px 0 4px;color:var(--primary);font-size:13px">
         &#128187; Windows (computers)
       </h4>
