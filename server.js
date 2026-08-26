@@ -3247,21 +3247,55 @@ app.post('/api/admin/app/version', requireAdmin, (req, res) => {
     });
   }
 
+  /**
+   * Rejects links that point at a WEB PAGE rather than the file.
+   *
+   * This is the failure people actually hit. GitHub answers a `/blob/` or
+   * `/releases/tag/` link with HTTP 200 and an HTML body, so the device
+   * downloads it happily and only fails at install time — with a message that
+   * blames the network. Catching it at publish time is far kinder than
+   * discovering it on fifty phones.
+   */
+  function linkProblem(url, extension, label) {
+    if (!/^https?:\/\//i.test(url)) {
+      return `The ${label} link must start with http:// or https://`;
+    }
+    if (/github\.com\/.+\/blob\//i.test(url)) {
+      return `That ${label} link opens a GitHub page, not the file. ` +
+        'Open Releases, right-click the file and choose "Copy link address" ' +
+        '— it must contain /releases/download/';
+    }
+    if (/github\.com\/.+\/releases\/tag\//i.test(url)) {
+      return `That ${label} link points at the release PAGE, not the file. ` +
+        'Right-click the attached file itself and copy its address ' +
+        '— it must contain /releases/download/';
+    }
+    if (/drive\.google\.com\/file\//i.test(url)) {
+      return 'A Google Drive "share" link opens a preview page, not the file. ' +
+        'Use a GitHub Release link instead.';
+    }
+    if (/dropbox\.com\/.+dl=0/i.test(url)) {
+      return 'That Dropbox link opens a preview page. Change dl=0 to dl=1, ' +
+        'or use a GitHub Release link.';
+    }
+    // Warn, do not block, on an odd extension: some hosts serve the right
+    // file from a URL that does not end in .apk or .exe.
+    return null;
+  }
+
   if (apkUrl) {
     if (!Number.isInteger(code) || code < 1) {
       return res.status(400).json({
         message: 'versionCode must be a whole number when publishing an APK.'
       });
     }
-    if (!/^https?:\/\//i.test(apkUrl)) {
-      return res.status(400).json({ message: 'apkUrl must start with http:// or https://' });
-    }
+    const problem = linkProblem(apkUrl, '.apk', 'APK');
+    if (problem) return res.status(400).json({ message: problem });
   }
 
   if (desktopUrl) {
-    if (!/^https?:\/\//i.test(desktopUrl)) {
-      return res.status(400).json({ message: 'desktopUrl must start with http:// or https://' });
-    }
+    const problem = linkProblem(desktopUrl, '.exe', 'Windows installer');
+    if (problem) return res.status(400).json({ message: problem });
     // The desktop updater compares dotted versions, so it needs one.
     if (!/^\d+(\.\d+)*$/.test(desktopVersion)) {
       return res.status(400).json({
