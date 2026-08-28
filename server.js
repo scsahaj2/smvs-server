@@ -816,6 +816,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             <option value="alert">Alerts only</option>
           </select>
         </div>
+                <div style="flex:1;min-width:140px">
+          <label style="margin-top:0">Device</label>
+          <select id="actDevice" onchange="renderActivity()">
+            <option value="">All devices</option>
+          </select>
+        </div>
         <div style="flex:1;min-width:120px">
           <label style="margin-top:0">When</label>
           <select id="actWhen" onchange="renderActivity()">
@@ -831,7 +837,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
 
       <table>
-        <thead><tr><th>Website</th><th>User</th><th>Category</th><th>Action</th><th>When</th></tr></thead>
+        <thead><tr><th>Website</th><th>User</th><th>Device</th><th>Category</th><th>Action</th><th>When</th></tr></thead>
         <tbody id="activityRows"></tbody>
       </table>
       <p id="noActivity" class="muted hidden">No blocked or alerted visits reported yet.</p>
@@ -1505,6 +1511,7 @@ function renderActivity(list) {
   const q = ($('actSearch') && $('actSearch').value || '').trim().toLowerCase();
   const who = ($('actUser') && $('actUser').value) || '';
   const what = ($('actAction') && $('actAction').value) || '';
+  const dev = ($('actDevice') && $('actDevice').value) || '';
   const when = ($('actWhen') && $('actWhen').value) || '';
 
   const cutoff = when === '24h' ? Date.now() - 864e5
@@ -1517,6 +1524,7 @@ function renderActivity(list) {
            (a.category || '').toLowerCase().includes(q)) &&
     (!who || a.userId === who) &&
     (!what || a.action === what) &&
+    (!dev || a.device === dev) &&
     (!cutoff || a.timestamp >= cutoff));
 
   const tbody = $('activityRows');
@@ -1534,7 +1542,8 @@ function renderActivity(list) {
     const tr = document.createElement('tr');
     tr.innerHTML = \`
       <td title="\${esc(a.url || '')}">\${esc(a.host || a.url)}</td>
-      <td>\${esc(a.username)}</td>
+            <td>\${esc(a.username)}</td>
+      <td class="muted">\${esc(a.device || '—')}</td>
       <td class="muted">\${esc(a.category)}</td>
       <td>
         <span class="badge \${a.action === 'block' ? 'b-off' : 'b-alert'}">\${a.action.toUpperCase()}</span>
@@ -1556,7 +1565,17 @@ function fillActivityFilters() {
     [...seen.entries()].map(([id, name]) =>
       \`<option value="\${esc(id)}">\${esc(name)}</option>\`).join('');
   sel.value = keep;
-}
+
+  // Device list, built from whatever actually appears in the log.
+  const dsel = $('actDevice');
+  if (dsel) {
+    const keepDev = dsel.value;
+    const devices = [...new Set(ACTIVITY.map(a => a.device).filter(Boolean))].sort();
+    dsel.innerHTML = '<option value="">All devices</option>' +
+      devices.map(d => \`<option value="\${esc(d)}">\${esc(d)}</option>\`).join('');
+    dsel.value = keepDev;
+  }
+}}
 
 // ---------------- roles ----------------
 
@@ -2489,15 +2508,18 @@ app.post('/api/auth/login', (req, res) => {
   if (req.body.deviceName) {
     const dev = d.devices.find(x => x.userId === user.id && x.name === req.body.deviceName);
     if (dev) dev.lastSeen = Date.now();
-    else d.devices.push({
+        else d.devices.push({
       userId: user.id, name: String(req.body.deviceName).slice(0, 60), lastSeen: Date.now()
     });
+  }
+  // Remembered so it can travel in the token — the activity endpoint has no
+  // other way to know which phone or computer a report came from.
+  const deviceName = String(req.body.deviceName || '').slice(0, 60);
   }
   save();
 
   // No expiry: the app stays signed in until the user taps Log Out.
-  const token = jwt.sign({ kind: 'device', sub: user.id }, JWT_SECRET);
-
+  const token = jwt.sign({ kind: 'device', sub: user.id, dev: deviceName }, JWT_SECRET);
   res.json({
     accessToken: token,
     expiresAtMillis: 0,
@@ -2541,7 +2563,10 @@ app.post('/api/activity', deviceAuth, (req, res) => {
       // Why it happened — "time window", "block list", "search" and so on.
       // Without this the log could only show the category, which is what made
       // a blocked site appear as merely alerted.
-      reason: String(e.reason || '').slice(0, 120),
+            reason: String(e.reason || '').slice(0, 120),
+      // Which phone or computer reported this. Taken from the token rather
+      // than the request body so a device cannot claim to be another one.
+      device: req.device.dev || '',
       timestamp: Number(e.timestamp) || Date.now()
     });
   }
