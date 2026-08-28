@@ -816,7 +816,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             <option value="alert">Alerts only</option>
           </select>
         </div>
-                <div style="flex:1;min-width:140px">
+        <div style="flex:1;min-width:140px">
           <label style="margin-top:0">Device</label>
           <select id="actDevice" onchange="renderActivity()">
             <option value="">All devices</option>
@@ -1542,8 +1542,8 @@ function renderActivity(list) {
     const tr = document.createElement('tr');
     tr.innerHTML = \`
       <td title="\${esc(a.url || '')}">\${esc(a.host || a.url)}</td>
-            <td>\${esc(a.username)}</td>
-      <td class="muted">\${esc(a.device || '—')}</td>
+      <td>\${esc(a.username)}</td>
+      <td class="muted">\${esc(a.device || '\u2014')}</td>
       <td class="muted">\${esc(a.category)}</td>
       <td>
         <span class="badge \${a.action === 'block' ? 'b-off' : 'b-alert'}">\${a.action.toUpperCase()}</span>
@@ -1566,7 +1566,9 @@ function fillActivityFilters() {
       \`<option value="\${esc(id)}">\${esc(name)}</option>\`).join('');
   sel.value = keep;
 
-  // Device list, built from whatever actually appears in the log.
+  // Device list, built from whatever actually appears in the log rather than
+  // from the registered-devices table: a device that has reported nothing
+  // would only be noise in a filter.
   const dsel = $('actDevice');
   if (dsel) {
     const keepDev = dsel.value;
@@ -1575,7 +1577,7 @@ function fillActivityFilters() {
       devices.map(d => \`<option value="\${esc(d)}">\${esc(d)}</option>\`).join('');
     dsel.value = keepDev;
   }
-}}
+}
 
 // ---------------- roles ----------------
 
@@ -2508,18 +2510,22 @@ app.post('/api/auth/login', (req, res) => {
   if (req.body.deviceName) {
     const dev = d.devices.find(x => x.userId === user.id && x.name === req.body.deviceName);
     if (dev) dev.lastSeen = Date.now();
-        else d.devices.push({
+    else d.devices.push({
       userId: user.id, name: String(req.body.deviceName).slice(0, 60), lastSeen: Date.now()
     });
   }
-  // Remembered so it can travel in the token — the activity endpoint has no
-  // other way to know which phone or computer a report came from.
+  // Kept so it can travel inside the token. The activity endpoint receives
+  // only a token, so this is the one chance to learn which phone or computer
+  // the reports will be coming from.
   const deviceName = String(req.body.deviceName || '').slice(0, 60);
-  }
   save();
 
   // No expiry: the app stays signed in until the user taps Log Out.
+  // `dev` rides along so /api/activity knows the source without the app
+  // having to send it — and without a device being able to claim to be
+  // another one, since the token is signed.
   const token = jwt.sign({ kind: 'device', sub: user.id, dev: deviceName }, JWT_SECRET);
+
   res.json({
     accessToken: token,
     expiresAtMillis: 0,
@@ -2563,9 +2569,9 @@ app.post('/api/activity', deviceAuth, (req, res) => {
       // Why it happened — "time window", "block list", "search" and so on.
       // Without this the log could only show the category, which is what made
       // a blocked site appear as merely alerted.
-            reason: String(e.reason || '').slice(0, 120),
-      // Which phone or computer reported this. Taken from the token rather
-      // than the request body so a device cannot claim to be another one.
+      reason: String(e.reason || '').slice(0, 120),
+      // Which device reported this. Read from the signed token rather than
+      // the request body, so it cannot be spoofed.
       device: req.device.dev || '',
       timestamp: Number(e.timestamp) || Date.now()
     });
