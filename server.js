@@ -1377,6 +1377,10 @@ async function loadDevices() {
       <td>\${esc(d.username)}</td>
       <td class="muted">\${d.lastSeen ? new Date(d.lastSeen).toLocaleString() : 'unknown'}</td>
       <td style="text-align:right">
+        <button class="ghost"
+          onclick="renameDevice('\${encodeURIComponent(d.userId)}','\${encodeURIComponent(d.deviceId || '')}','\${esc(d.name || '')}')">
+          Rename
+        </button>
         <button class="danger"
           onclick="removeDevice('\${encodeURIComponent(d.userId)}','\${encodeURIComponent(d.name || '')}')">
           Remove
@@ -1384,6 +1388,33 @@ async function loadDevices() {
       </td>\`;
     tbody.appendChild(tr);
   }
+}
+
+/**
+ * Renames a device.
+ *
+ * The apps refuse to let a user rename their own machine — an activity log is
+ * only worth reading if the names in it are trustworthy — so this is the only
+ * place a name can change. The device adopts it at its next sign-in.
+ */
+async function renameDevice(userId, deviceId, current) {
+  const name = prompt('New name for this device:', current || '');
+  if (name === null) return;                       // cancelled
+  if (!name.trim()) return alert('Device name cannot be empty.');
+
+  try {
+    await api('/api/admin/devices/rename', {
+      method: 'PUT',
+      body: {
+        userId: decodeURIComponent(userId),
+        deviceId: decodeURIComponent(deviceId),
+        oldName: current,
+        name: name.trim()
+      }
+    });
+    await loadDevices();
+    toast('Device renamed. It will update the next time it signs in.');
+  } catch (e) { alert(e.message); }
 }
 
 async function removeDevice(userId, name) {
@@ -2507,17 +2538,48 @@ app.post('/api/auth/login', (req, res) => {
   }
 
   user.lastLoginAt = Date.now();
-  if (req.body.deviceName) {
-    const dev = d.devices.find(x => x.userId === user.id && x.name === req.body.deviceName);
-    if (dev) dev.lastSeen = Date.now();
-    else d.devices.push({
-      userId: user.id, name: String(req.body.deviceName).slice(0, 60), lastSeen: Date.now()
-    });
+
+  /*
+    Device registration.
+
+    Apps now send a stable `deviceId` chosen at install time, so a computer
+    that is reinstalled updates its existing row instead of appearing twice.
+    The id is matched first; the name is only a fallback for older apps.
+
+    The administrator is the sole authority on a device's name: if the row
+    already carries one, the server keeps it and tells the app, which adopts
+    it. That is what stops a user renaming their own machine.
+  */
+  let deviceRow = null;
+  const sentId = String(req.body.deviceId || '').slice(0, 64);
+  const sentName = String(req.body.deviceName || '').slice(0, 60);
+
+  if (sentId) {
+    deviceRow = d.devices.find(x => x.userId === user.id && x.deviceId === sentId) || null;
   }
-  // Kept so it can travel inside the token. The activity endpoint receives
-  // only a token, so this is the one chance to learn which phone or computer
-  // the reports will be coming from.
-  const deviceName = String(req.body.deviceName || '').slice(0, 60);
+  if (!deviceRow && sentName) {
+    deviceRow = d.devices.find(x => x.userId === user.id && x.name === sentName) || null;
+    // Adopt the id so the next reinstall is recognised.
+    if (deviceRow && sentId) deviceRow.deviceId = sentId;
+  }
+
+  if (deviceRow) {
+    deviceRow.lastSeen = Date.now();
+    if (req.body.platform) deviceRow.platform = String(req.body.platform).slice(0, 20);
+  } else if (sentName || sentId) {
+    deviceRow = {
+      userId: user.id,
+      deviceId: sentId,
+      name: sentName || 'Unnamed device',
+      platform: String(req.body.platform || '').slice(0, 20),
+      lastSeen: Date.now(),
+      createdAt: Date.now()
+    };
+    d.devices.push(deviceRow);
+  }
+
+  // The name the DASHBOARD holds wins, so an admin rename reaches the device.
+  const deviceName = (deviceRow && deviceRow.name) || sentName;
   save();
 
   // No expiry: the app stays signed in until the user taps Log Out.
@@ -2528,6 +2590,8 @@ app.post('/api/auth/login', (req, res) => {
 
   res.json({
     accessToken: token,
+    // Echoed so the app can adopt an administrator's rename.
+    device: deviceRow ? { name: deviceRow.name, deviceId: deviceRow.deviceId || '' } : null,
     expiresAtMillis: 0,
     user: {
       id: user.id,
@@ -2547,7 +2611,137 @@ app.get('/api/me/policy', deviceAuth, (req, res) => {
 
   user.lastSyncAt = Date.now();
   save();
-  res.json({ policy: policyOf(user) });
+  res.json({ policy: policyOf(user), rev: revisionFor(user) });
+});
+
+/* ------------------------------------------------------------------ *
+ *  Instant rule delivery (long polling)
+ *
+ *  Devices used to poll every 60 s (Android) or 5 min (desktop), so an
+ *  administrator could change a rule and watch nothing happen for minutes.
+ *  Polling faster would mean 50 devices hammering a free Render dyno.
+ *
+ *  Instead the device asks "tell me when revision X changes" and the server
+ *  simply does not answer until it does. The reply then arrives within
+ *  milliseconds of the admin pressing Save. If nothing changes the request
+ *  returns `changed:false` after 25 s and the device asks again — one open
+ *  connection per device, near-zero traffic, and no WebSocket support needed
+ *  (Render's free tier proxies these fine).
+ * ------------------------------------------------------------------ */
+
+/** Everyone currently parked on /api/me/policy/wait, keyed by user id. */
+const policyWaiters = new Map();
+
+/**
+ * A number that changes whenever anything affecting this user's rules changes.
+ * Derived from the user record and their role, so no extra bookkeeping is
+ * needed at each of the many places that edit rules.
+ */
+function revisionFor(user) {
+  const role = findRole(user.role);
+  return Math.max(
+    Number(user.rulesUpdatedAt) || 0,
+    Number(user.updatedAt) || 0,
+    (role && Number(role.updatedAt)) || 0,
+    user.enabled === false ? 1 : 0
+  );
+}
+
+/**
+ * Wakes every device belonging to `userIds` (or all devices when omitted).
+ * Called from the admin endpoints right after a rule is saved.
+ */
+function notifyPolicyChanged(userIds) {
+  const ids = userIds && userIds.length
+    ? userIds
+    : Array.from(policyWaiters.keys());
+
+  for (const id of ids) {
+    const waiters = policyWaiters.get(id);
+    if (!waiters) continue;
+    policyWaiters.delete(id);
+    for (const w of waiters) {
+      clearTimeout(w.timer);
+      try { w.send(); } catch { /* client vanished */ }
+    }
+  }
+}
+
+/** Marks a user's rules as changed and pushes to their devices at once. */
+function bumpUser(user) {
+  if (!user) return;
+  user.rulesUpdatedAt = Date.now();
+  notifyPolicyChanged([user.id]);
+}
+
+/** Same, for every user holding a given role. */
+function bumpRole(roleId) {
+  const d = db();
+  const now = Date.now();
+  const role = (d.roles || []).find(r => r.id === roleId || r.name === roleId);
+  if (role) role.updatedAt = now;
+  const affected = (d.users || [])
+    .filter(u => u.role === roleId || (role && u.role === role.id))
+    .map(u => { u.rulesUpdatedAt = now; return u.id; });
+  notifyPolicyChanged(affected);
+}
+
+app.get('/api/me/policy/wait', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Account no longer exists.' });
+  if (!user.enabled) return res.status(403).json({ message: 'Account disabled.' });
+
+  const since = Number(req.query.rev) || 0;
+  const current = revisionFor(user);
+
+  // Already stale — answer immediately, no waiting.
+  if (current > since) {
+    return res.json({ changed: true, rev: current, policy: policyOf(user) });
+  }
+
+  let done = false;
+  const send = () => {
+    if (done) return;
+    done = true;
+    // Re-read the database rather than closing over the snapshot taken when
+    // the request arrived: by the time this runs, the admin has just written
+    // to it, and that write is the whole reason we are replying.
+    const fresh = db().users.find(u => u.id === req.device.sub);
+    if (!fresh) return res.json({ changed: true, revoked: true });
+    if (!fresh.enabled) return res.json({ changed: true, revoked: true });
+    res.json({ changed: true, rev: revisionFor(fresh), policy: policyOf(fresh) });
+  };
+
+  // Nothing happened in 25 s: reply so the proxy never times the socket out.
+  const timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    const list = policyWaiters.get(user.id);
+    if (list) {
+      const i = list.indexOf(entry);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) policyWaiters.delete(user.id);
+    }
+    res.json({ changed: false, rev: current });
+  }, 25000);
+
+  const entry = { send, timer };
+  if (!policyWaiters.has(user.id)) policyWaiters.set(user.id, []);
+  policyWaiters.get(user.id).push(entry);
+
+  // Client hung up (app closed, laptop slept) — stop tracking it.
+  req.on('close', () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    const list = policyWaiters.get(user.id);
+    if (list) {
+      const i = list.indexOf(entry);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) policyWaiters.delete(user.id);
+    }
+  });
 });
 
 app.post('/api/auth/logout', deviceAuth, (_req, res) => res.json({ ok: true }));
@@ -2707,7 +2901,26 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
   if (b.mode !== undefined) user.mode = b.mode;
   if (b.allowedPatterns !== undefined) user.allowedPatterns = b.allowedPatterns;
   if (b.blockedPatterns !== undefined) user.blockedPatterns = b.blockedPatterns;
-  if (b.categoryRules !== undefined) user.categoryRules = b.categoryRules;
+  if (b.categoryRules !== undefined) {
+    /*
+      Merge, never replace.
+
+      The dashboard posts the full set of 37 categories, but anything else
+      talking to this API — a script, a future screen, a partial save — may
+      send only the categories it means to change. Assigning the body
+      wholesale silently dropped the other 36, and because the missing keys
+      then fell back to the role, an administrator's change appeared to be
+      accepted (HTTP 200) and yet never reached the device.
+
+      Merging keeps untouched categories exactly as they were, and
+      `completeCategoryRules` fills any gap from the role/defaults so the
+      stored map is always whole.
+    */
+    user.categoryRules = completeCategoryRules(
+      { ...(user.categoryRules || {}), ...b.categoryRules },
+      user.categoryRules
+    );
+  }
   if (b.uncategorizedAction !== undefined) user.uncategorizedAction = b.uncategorizedAction;
   if (b.features !== undefined) user.features = { ...defaultFeatures(), ...b.features };
   if (b.homeUrl !== undefined) user.homeUrl = b.homeUrl;
@@ -2739,7 +2952,10 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
   const roleRules = rulesForRole(user.role);
   user.userOverrides = diffOverrides(
     {
-      categoryRules: b.categoryRules !== undefined ? b.categoryRules : undefined,
+      // Compare the user's FULL stored map against the role, not just the
+      // keys this request happened to mention. Passing only the body meant a
+      // partial save wiped out overrides the admin had set earlier.
+      categoryRules: b.categoryRules !== undefined ? user.categoryRules : undefined,
       homeUrl: b.homeUrl !== undefined ? b.homeUrl : undefined,
       uncategorizedAction:
         b.uncategorizedAction !== undefined ? b.uncategorizedAction : undefined,
@@ -2748,6 +2964,7 @@ app.put('/api/admin/users/:id', requireAdmin, (req, res) => {
     roleRules
   );
 
+  bumpUser(user);          // wake this user's devices immediately
   save();
   res.json({ user: publicUser(user) });
 });
@@ -2821,6 +3038,7 @@ app.post('/api/admin/users/:id/enabled', requireAdmin, (req, res) => {
   if (!user) return res.status(404).json({ message: 'User not found.' });
 
   user.enabled = req.body.enabled !== false;
+  bumpUser(user);          // a disabled account must be cut off at once
   save();
   res.json({ user: publicUser(user) });
 });
@@ -2929,6 +3147,7 @@ app.put('/api/admin/roles/:id', requireAdmin, (req, res) => {
     }
   }
 
+  bumpRole(role.id);       // every device on this role refreshes at once
   save();
   res.json({ role, usersUpdated: updated });
 });
@@ -3029,6 +3248,10 @@ app.get('/api/admin/devices', requireAdmin, (_req, res) => {
       userId: dev.userId,
       username: byId[dev.userId] ? byId[dev.userId].username : '(deleted user)',
       name: dev.name,
+      // Needed so the dashboard can rename the right row even when two
+      // machines happen to share a name.
+      deviceId: dev.deviceId || '',
+      platform: dev.platform || '',
       lastSeen: dev.lastSeen || 0
     }))
   });
@@ -3046,6 +3269,42 @@ app.delete('/api/admin/devices', requireAdmin, (req, res) => {
   });
   save();
   res.json({ ok: true, removed: before - d.devices.length });
+});
+
+/**
+ * Renames a device.
+ *
+ * The apps deliberately refuse to let a user rename their own machine — an
+ * activity log is only worth reading if the names in it are trustworthy. This
+ * is the one route that can change a name, and it requires an administrator.
+ * The device adopts the new name the next time it signs in.
+ */
+app.put('/api/admin/devices/rename', requireAdmin, (req, res) => {
+  const d = db();
+  const b = req.body || {};
+  const userId = String(b.userId || '');
+  const oldName = String(b.oldName || '');
+  const deviceId = String(b.deviceId || '');
+  const newName = String(b.name || '').trim().slice(0, 60);
+
+  if (!newName) return res.status(400).json({ message: 'Device name cannot be empty.' });
+
+  const dev = d.devices.find(x =>
+    x.userId === userId &&
+    (deviceId ? x.deviceId === deviceId : x.name === oldName));
+
+  if (!dev) return res.status(404).json({ message: 'Device not found.' });
+
+  const clash = d.devices.find(x =>
+    x !== dev && x.userId === userId && x.name === newName);
+  if (clash) {
+    return res.status(409).json({ message: `This user already has a device called "${newName}".` });
+  }
+
+  dev.name = newName;
+  dev.renamedAt = Date.now();
+  save();
+  res.json({ ok: true, device: dev });
 });
 
 // ---------------- dashboard administrators ----------------
