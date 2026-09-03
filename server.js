@@ -3422,6 +3422,158 @@ app.delete('/api/admin/admins/:id', requireAdmin, (req, res) => {
 //   - `sessionVersion` gives last-writer-wins without merge corruption
 //   - a profile can be wiped remotely by the admin (POST .../sessions/clear)
 
+/* ------------------------------------------------------------------ *
+ *  Cloud bookmarks
+ *
+ *  Bookmarks follow the account, so a page saved on the library PC is there
+ *  on the phone as well. Chrome Sync cannot be used for this — Google closed
+ *  it to non-Google browsers in 2021 — so the rules server carries them, the
+ *  same way it already carries the policy.
+ *
+ *  Delivery reuses the long-poll machinery built for instant rule sync, so a
+ *  bookmark saved on one device shows up on the others in well under a second
+ *  rather than on some later poll.
+ *
+ *  Conflicts are settled by a per-device sequence rather than a timestamp:
+ *  a phone with a wrong clock must not be able to erase a laptop's work.
+ * ------------------------------------------------------------------ */
+
+/** Devices parked on /api/me/bookmarks/wait, keyed by user id. */
+const bookmarkWaiters = new Map();
+
+/** Wakes every device on this account except the one that just wrote. */
+function notifyBookmarksChanged(userId, exceptDevice) {
+  const waiters = bookmarkWaiters.get(userId);
+  if (!waiters) return;
+
+  const keep = [];
+  for (const w of waiters) {
+    // The writer already has this state; waking it would bounce it straight
+    // back for no reason.
+    if (exceptDevice && w.device === exceptDevice) { keep.push(w); continue; }
+    clearTimeout(w.timer);
+    try { w.send(); } catch { /* client vanished */ }
+  }
+
+  if (keep.length) bookmarkWaiters.set(userId, keep);
+  else bookmarkWaiters.delete(userId);
+}
+
+app.get('/api/me/bookmarks', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+
+  res.json({
+    version: user.bookmarkVersion || 0,
+    nodes: user.bookmarks || [],
+    updatedAt: user.bookmarksUpdatedAt || 0
+  });
+});
+
+app.put('/api/me/bookmarks', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+
+  const nodes = Array.isArray(req.body.nodes) ? req.body.nodes : null;
+  if (!nodes) return res.status(400).json({ message: 'nodes must be an array' });
+
+  // A tree this large is a bug, not a person's bookmarks.
+  if (nodes.length > 5000) {
+    return res.status(413).json({ message: 'Too many bookmarks (limit 5000).' });
+  }
+
+  /*
+    Reject a write built on a version we have already moved past.
+
+    Without this, two devices saving at once would silently overwrite each
+    other. The loser is told the current version and merges before retrying,
+    so no bookmark is ever quietly lost.
+  */
+  const base = Number(req.body.baseVersion);
+  const current = user.bookmarkVersion || 0;
+  if (Number.isFinite(base) && base !== current) {
+    return res.status(409).json({
+      message: 'Bookmarks changed on another device.',
+      version: current,
+      nodes: user.bookmarks || []
+    });
+  }
+
+  // Keep only the fields we understand, so a compromised client cannot
+  // smuggle extra data into other devices through this route.
+  user.bookmarks = nodes.slice(0, 5000).map(n => ({
+    id: String(n.id || '').slice(0, 64),
+    parentId: n.parentId === null ? null : String(n.parentId || '').slice(0, 64),
+    type: n.type === 'folder' ? 'folder' : 'link',
+    title: String(n.title || '').slice(0, 200),
+    url: n.type === 'folder' ? undefined : String(n.url || '').slice(0, 2000),
+    order: Number(n.order) || 0,
+    added: Number(n.added) || Date.now()
+  }));
+  user.bookmarkVersion = current + 1;
+  user.bookmarksUpdatedAt = Date.now();
+  save();
+
+  notifyBookmarksChanged(user.id, req.device.dev);
+  res.json({ ok: true, version: user.bookmarkVersion });
+});
+
+app.get('/api/me/bookmarks/wait', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+
+  const since = Number(req.query.version) || 0;
+  const current = user.bookmarkVersion || 0;
+
+  // Already behind — answer at once, no waiting.
+  if (current > since) {
+    return res.json({ changed: true, version: current, nodes: user.bookmarks || [] });
+  }
+
+  let done = false;
+  const send = () => {
+    if (done) return;
+    done = true;
+    // Re-read: the write that woke us happened after this request arrived.
+    const fresh = db().users.find(u => u.id === req.device.sub);
+    if (!fresh) return res.json({ changed: false, version: since });
+    res.json({
+      changed: true,
+      version: fresh.bookmarkVersion || 0,
+      nodes: fresh.bookmarks || []
+    });
+  };
+
+  const drop = () => {
+    const list = bookmarkWaiters.get(user.id);
+    if (!list) return;
+    const i = list.indexOf(entry);
+    if (i >= 0) list.splice(i, 1);
+    if (!list.length) bookmarkWaiters.delete(user.id);
+  };
+
+  const timer = setTimeout(() => {
+    if (done) return;
+    done = true;
+    drop();
+    res.json({ changed: false, version: current });
+  }, 25000);
+
+  const entry = { send, timer, device: req.device.dev };
+  if (!bookmarkWaiters.has(user.id)) bookmarkWaiters.set(user.id, []);
+  bookmarkWaiters.get(user.id).push(entry);
+
+  req.on('close', () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    drop();
+  });
+});
+
 app.get('/api/me/websession', deviceAuth, (req, res) => {
   const d = db();
   const user = d.users.find(u => u.id === req.device.sub);
