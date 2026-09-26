@@ -65,7 +65,17 @@ const DEFAULT_DB = {
   users: [],        // browser profiles (Qustodio "profiles")
   activity: [],     // blocked / alerted visits reported by devices
   devices: [],      // which phone last synced which user
-  appVersion: null, // latest published APK for auto-update
+  appVersion: null, // latest published build for the LIVE channel
+  /*
+    The BETA channel's published build.
+
+    Kept as a second record rather than a `channel` field inside one record
+    because the two must be able to disagree: that is the whole point of a
+    beta. `appVersion` keeps its old name and old meaning so that every
+    device already in the field, and every saved database, carries on working
+    without a migration.
+  */
+  appVersionBeta: null,
   roles: []         // custom roles created by the administrator
 };
 
@@ -705,12 +715,49 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         automatic, and a mandatory update blocks browsing until it is applied.
       </div>
 
-      <div id="currentVersionBox" class="hidden"
-           style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>Currently published</b>
-        <div id="currentVersionText" class="muted" style="margin-top:6px"></div>
-        <button class="danger" style="margin-top:10px;font-size:12px"
-                onclick="unpublishVersion()">Unpublish</button>
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
+        <b>Release channel</b>
+        <p class="muted" style="margin:6px 0 10px">
+          <b>Live</b> is every device in the school. <b>Beta</b> is the separate
+          test build. Each channel remembers its own version, so publishing to
+          one never touches the other.
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button id="chanLiveBtn" class="primary" style="font-size:13px"
+                  onclick="switchChannel('live')">Live</button>
+          <button id="chanBetaBtn" class="secondary" style="font-size:13px"
+                  onclick="switchChannel('beta')">Beta</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-bottom:14px">
+        <div style="background:var(--bg);border-radius:10px;padding:14px">
+          <b>&#128994; Live channel</b>
+          <div id="liveVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
+          <button class="danger" style="margin-top:10px;font-size:12px"
+                  onclick="unpublishVersion('live')">Unpublish live</button>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:14px">
+          <b>&#128309; Beta channel</b>
+          <div id="betaVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
+          <button class="danger" style="margin-top:10px;font-size:12px"
+                  onclick="unpublishVersion('beta')">Unpublish beta</button>
+        </div>
+      </div>
+
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
+        <b>Move a build between channels</b>
+        <p class="muted" style="margin:6px 0 10px">
+          Copies only <i>which build that channel offers</i> — the version
+          number and the download links. Users, roles, bookmarks, profiles and
+          history are never copied.
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="secondary" style="font-size:13px"
+                  onclick="copyChannel('beta','live')">Beta &rarr; Live</button>
+          <button class="secondary" style="font-size:13px"
+                  onclick="copyChannel('live','beta')">Live &rarr; Beta</button>
+        </div>
       </div>
 
       <h4 style="margin:18px 0 4px;color:var(--primary);font-size:13px">
@@ -782,7 +829,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         </span>
       </label>
       <p id="updateErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
-      <button class="primary" style="margin-top:16px" onclick="publishVersion()">
+      <button id="publishBtn" class="primary" style="margin-top:16px" onclick="publishVersion()">
         Publish update to all devices
       </button>
     </div>
@@ -1791,26 +1838,50 @@ function showTab(which) {
   if (which === 'admins') loadAdmins();
 }
 
+/* Which channel the publish form is pointed at. */
+var updChannel = 'live';
+
+function switchChannel(c) {
+  updChannel = (c === 'beta') ? 'beta' : 'live';
+  $('chanLiveBtn').className = (updChannel === 'live') ? 'primary' : 'secondary';
+  $('chanBetaBtn').className = (updChannel === 'beta') ? 'primary' : 'secondary';
+  $('publishBtn').textContent = (updChannel === 'beta')
+    ? 'Publish update to BETA devices'
+    : 'Publish update to all devices';
+  loadVersion();
+}
+
+function describeVersion(v) {
+  if (!v) return 'Nothing published yet.';
+  const lines = [];
+  if (v.apkUrl) {
+    lines.push('&#128241; <b>Android</b> ' + esc(v.versionName || String(v.versionCode)) +
+      ' (code ' + v.versionCode + ')<br><span class="muted">' + esc(v.apkUrl) + '</span>');
+  }
+  if (v.desktopUrl) {
+    lines.push('&#128187; <b>Windows</b> ' + esc(v.desktopVersion) +
+      '<br><span class="muted">' + esc(v.desktopUrl) + '</span>');
+  }
+  lines.push((v.mandatory ? 'Mandatory' : 'Optional') +
+    ' &middot; published ' + new Date(v.publishedAt).toLocaleString());
+  return lines.join('<br><br>');
+}
+
 async function loadVersion() {
   try {
     const d = await api('/api/admin/app/version');
-    const v = d.appVersion;
-    const box = $('currentVersionBox');
-    if (!v) { box.classList.add('hidden'); return; }
-    box.classList.remove('hidden');
-    const lines = [];
-    if (v.apkUrl) {
-      lines.push('&#128241; <b>Android</b> ' + esc(v.versionName || String(v.versionCode)) +
-        ' (code ' + v.versionCode + ')<br><span class="muted">' + esc(v.apkUrl) + '</span>');
-    }
-    if (v.desktopUrl) {
-      lines.push('&#128187; <b>Windows</b> ' + esc(v.desktopVersion) +
-        '<br><span class="muted">' + esc(v.desktopUrl) + '</span>');
-    }
-    lines.push((v.mandatory ? 'Mandatory' : 'Optional') +
-      ' &middot; published ' + new Date(v.publishedAt).toLocaleString());
-    $('currentVersionText').innerHTML = lines.join('<br><br>');
+    $('liveVersionText').innerHTML = describeVersion(d.appVersion);
+    $('betaVersionText').innerHTML = describeVersion(d.appVersionBeta);
 
+    const v = (updChannel === 'beta') ? d.appVersionBeta : d.appVersion;
+    if (!v) {
+      $('uVersionCode').value = '';
+      $('uVersionName').value = '';
+      $('uApkUrl').value = '';
+      $('uDesktopVersion').value = '';
+      $('uDesktopUrl').value = '';
+      return;
+    }
     $('uVersionCode').value = v.versionCode ? v.versionCode + 1 : '';
     $('uVersionName').value = '';
     $('uApkUrl').value = v.apkUrl || '';
@@ -1820,6 +1891,21 @@ async function loadVersion() {
   } catch (e) { /* non-fatal */ }
 }
 
+async function copyChannel(from, to) {
+  const msg = 'Copy the ' + from + ' build onto the ' + to +
+    ' channel?\\n\\nOnly the version number and download links move. ' +
+    'No user data is copied.';
+  if (!confirm(msg)) return;
+  try {
+    await api('/api/admin/app/version/copy', {
+      method: 'POST',
+      body: JSON.stringify({ from: from, to: to })
+    });
+    toast('Copied ' + from + ' to ' + to);
+    await loadVersion();
+  } catch (e) { alert(e.message); }
+}
+
 async function publishVersion() {
   const err = $('updateErr');
   err.classList.add('hidden');
@@ -1827,6 +1913,7 @@ async function publishVersion() {
     await api('/api/admin/app/version', {
       method: 'POST',
       body: JSON.stringify({
+        channel: updChannel,
         versionCode: parseInt($('uVersionCode').value, 10),
         versionName: $('uVersionName').value.trim(),
         apkUrl: $('uApkUrl').value.trim(),
@@ -1837,7 +1924,7 @@ async function publishVersion() {
         mandatory: $('uMandatory').checked
       })
     });
-    toast('Published — devices will pick it up automatically');
+    toast('Published to ' + updChannel + ' — devices will pick it up automatically');
     await loadVersion();
   } catch (e) {
     err.textContent = e.message;
@@ -1845,12 +1932,13 @@ async function publishVersion() {
   }
 }
 
-async function unpublishVersion() {
-  if (!confirm('Stop offering this update?')) return;
+async function unpublishVersion(channel) {
+  const ch = (channel === 'beta') ? 'beta' : 'live';
+  if (!confirm('Stop offering the ' + ch + ' update?')) return;
   try {
-    await api('/api/admin/app/version', { method: 'DELETE' });
-    $('currentVersionBox').classList.add('hidden');
-    toast('Unpublished');
+    await api('/api/admin/app/version?channel=' + ch, { method: 'DELETE' });
+    toast('Unpublished ' + ch);
+    await loadVersion();
   } catch (e) { alert(e.message); }
 }
 
@@ -3442,15 +3530,20 @@ app.delete('/api/admin/admins/:id', requireAdmin, (req, res) => {
 const bookmarkWaiters = new Map();
 
 /** Wakes every device on this account except the one that just wrote. */
-function notifyBookmarksChanged(userId, exceptDevice) {
+function notifyBookmarksChanged(userId, exceptDevice, profileId) {
   const waiters = bookmarkWaiters.get(userId);
   if (!waiters) return;
 
   const keep = [];
   for (const w of waiters) {
+    // A device sitting in a different profile is not affected by this write;
+    // waking it would hand it the wrong profile's bookmarks.
+    if (profileId && w.profileId && w.profileId !== profileId) { keep.push(w); continue; }
+
     // The writer already has this state; waking it would bounce it straight
     // back for no reason.
     if (exceptDevice && w.device === exceptDevice) { keep.push(w); continue; }
+
     clearTimeout(w.timer);
     try { w.send(); } catch { /* client vanished */ }
   }
@@ -3459,15 +3552,142 @@ function notifyBookmarksChanged(userId, exceptDevice) {
   else bookmarkWaiters.delete(userId);
 }
 
-app.get('/api/me/bookmarks', deviceAuth, (req, res) => {
+/*
+  Bookmarks are stored PER PROFILE, not per account.
+
+  THE BUG THIS FIXES: they used to live on the user record, one list per
+  account. But every device keeps a separate bookmark tree for each profile,
+  so opening "Personal" and pushing its (empty) tree overwrote everything
+  "Work" had saved. Proven with two profiles on one account: after switching,
+  the first profile's bookmarks were gone from the cloud.
+
+  Keying by profile makes the cloud mirror what the devices actually hold.
+  The profile id is the same string on every device, because it is generated
+  once and travels with the profile, so "Work" on the Samsung and "Work" on
+  the Oppo resolve to the same bucket.
+*/
+
+/** The per-profile bookmark record, created on first use. */
+function bookmarkBucket(user, profileId) {
+  if (!user.bookmarkSets || typeof user.bookmarkSets !== 'object') {
+    user.bookmarkSets = {};
+
+    // One-time migration: an account that synced before this change has a
+    // single flat list. Hand it to the first profile that asks, so nobody
+    // loses what they had.
+    if (Array.isArray(user.bookmarks) && user.bookmarks.length) {
+      user.bookmarkSets.__legacy = {
+        nodes: user.bookmarks,
+        version: user.bookmarkVersion || 0,
+        updatedAt: user.bookmarksUpdatedAt || 0
+      };
+    }
+  }
+
+  const key = String(profileId || 'default');
+  if (!user.bookmarkSets[key]) {
+    // Adopt the legacy list once, then retire it.
+    const legacy = user.bookmarkSets.__legacy;
+    user.bookmarkSets[key] = legacy
+      ? { nodes: legacy.nodes, version: legacy.version, updatedAt: legacy.updatedAt }
+      : { nodes: [], version: 0, updatedAt: 0 };
+    if (legacy) delete user.bookmarkSets.__legacy;
+  }
+  return user.bookmarkSets[key];
+}
+
+/** Which profile this request is about. */
+function profileKey(req) {
+  return String(req.query.profileId || req.body?.profileId || 'default').slice(0, 64);
+}
+
+/* ------------------------------------------------------------------ *
+ *  Profile list
+ *
+ *  Profiles used to exist only on the machine that created them, so signing
+ *  the same account into a second device showed none of them — the person had
+ *  to recreate "Work" by hand, and because a new profile gets a new id, its
+ *  bookmarks lived in a different bucket and never appeared.
+ *
+ *  The list travels with the account now. What travels is only the
+ *  DESCRIPTION of a profile: its id, name, colour and whether it is shared.
+ *  Website logins do NOT travel — see the note on cookie sync — and neither
+ *  does a profile password, which stays on the machine that set it.
+ * ------------------------------------------------------------------ */
+
+app.get('/api/me/profiles', deviceAuth, (req, res) => {
   const d = db();
   const user = d.users.find(u => u.id === req.device.sub);
   if (!user) return res.status(404).json({ message: 'Unknown user' });
 
   res.json({
-    version: user.bookmarkVersion || 0,
-    nodes: user.bookmarks || [],
-    updatedAt: user.bookmarksUpdatedAt || 0
+    version: user.profileVersion || 0,
+    profiles: user.profiles || []
+  });
+});
+
+app.put('/api/me/profiles', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+
+  const incoming = Array.isArray(req.body.profiles) ? req.body.profiles : null;
+  if (!incoming) return res.status(400).json({ message: 'profiles must be an array' });
+  if (incoming.length > 50) {
+    return res.status(413).json({ message: 'Too many profiles (limit 50).' });
+  }
+
+  /*
+    Merge by id rather than replace.
+
+    A device that has been offline knows nothing of a profile created
+    elsewhere; letting it overwrite the list would delete that profile for
+    everyone. Union keeps both sides, and the newer name wins on a clash.
+  */
+  const byId = new Map();
+  for (const p of user.profiles || []) byId.set(p.id, p);
+
+  for (const raw of incoming) {
+    const id = String(raw.id || '').slice(0, 64);
+    if (!id) continue;
+
+    const existing = byId.get(id);
+    const updatedAt = Number(raw.updatedAt) || 0;
+
+    // Keep only fields we understand, and never accept a password hash.
+    const clean = {
+      id,
+      name: String(raw.name || 'Profile').slice(0, 40),
+      colour: String(raw.colour || '').slice(0, 16),
+      shared: raw.shared === true,
+      createdAt: Number(raw.createdAt) || Date.now(),
+      updatedAt: updatedAt || Date.now()
+    };
+
+    if (!existing || (Number(existing.updatedAt) || 0) <= clean.updatedAt) {
+      byId.set(id, clean);
+    }
+  }
+
+  user.profiles = [...byId.values()];
+  user.profileVersion = (user.profileVersion || 0) + 1;
+  save();
+
+  res.json({ ok: true, version: user.profileVersion, profiles: user.profiles });
+});
+
+app.get('/api/me/bookmarks', deviceAuth, (req, res) => {
+  const d = db();
+  const user = d.users.find(u => u.id === req.device.sub);
+  if (!user) return res.status(404).json({ message: 'Unknown user' });
+
+  const bucket = bookmarkBucket(user, profileKey(req));
+  save();
+
+  res.json({
+    version: bucket.version || 0,
+    nodes: bucket.nodes || [],
+    updatedAt: bucket.updatedAt || 0
   });
 });
 
@@ -3491,19 +3711,21 @@ app.put('/api/me/bookmarks', deviceAuth, (req, res) => {
     other. The loser is told the current version and merges before retrying,
     so no bookmark is ever quietly lost.
   */
+  const bucket = bookmarkBucket(user, profileKey(req));
+
   const base = Number(req.body.baseVersion);
-  const current = user.bookmarkVersion || 0;
+  const current = bucket.version || 0;
   if (Number.isFinite(base) && base !== current) {
     return res.status(409).json({
       message: 'Bookmarks changed on another device.',
       version: current,
-      nodes: user.bookmarks || []
+      nodes: bucket.nodes || []
     });
   }
 
   // Keep only the fields we understand, so a compromised client cannot
   // smuggle extra data into other devices through this route.
-  user.bookmarks = nodes.slice(0, 5000).map(n => ({
+  bucket.nodes = nodes.slice(0, 5000).map(n => ({
     id: String(n.id || '').slice(0, 64),
     parentId: n.parentId === null ? null : String(n.parentId || '').slice(0, 64),
     type: n.type === 'folder' ? 'folder' : 'link',
@@ -3512,12 +3734,13 @@ app.put('/api/me/bookmarks', deviceAuth, (req, res) => {
     order: Number(n.order) || 0,
     added: Number(n.added) || Date.now()
   }));
-  user.bookmarkVersion = current + 1;
-  user.bookmarksUpdatedAt = Date.now();
+  bucket.version = current + 1;
+  bucket.updatedAt = Date.now();
   save();
 
-  notifyBookmarksChanged(user.id, req.device.dev);
-  res.json({ ok: true, version: user.bookmarkVersion });
+  // Only devices looking at the SAME profile need waking.
+  notifyBookmarksChanged(user.id, req.device.dev, profileKey(req));
+  res.json({ ok: true, version: bucket.version });
 });
 
 app.get('/api/me/bookmarks/wait', deviceAuth, (req, res) => {
@@ -3525,12 +3748,14 @@ app.get('/api/me/bookmarks/wait', deviceAuth, (req, res) => {
   const user = d.users.find(u => u.id === req.device.sub);
   if (!user) return res.status(404).json({ message: 'Unknown user' });
 
+  const key = profileKey(req);
+  const bucket = bookmarkBucket(user, key);
   const since = Number(req.query.version) || 0;
-  const current = user.bookmarkVersion || 0;
+  const current = bucket.version || 0;
 
   // Already behind — answer at once, no waiting.
   if (current > since) {
-    return res.json({ changed: true, version: current, nodes: user.bookmarks || [] });
+    return res.json({ changed: true, version: current, nodes: bucket.nodes || [] });
   }
 
   let done = false;
@@ -3540,10 +3765,11 @@ app.get('/api/me/bookmarks/wait', deviceAuth, (req, res) => {
     // Re-read: the write that woke us happened after this request arrived.
     const fresh = db().users.find(u => u.id === req.device.sub);
     if (!fresh) return res.json({ changed: false, version: since });
+    const b = bookmarkBucket(fresh, key);
     res.json({
       changed: true,
-      version: fresh.bookmarkVersion || 0,
-      nodes: fresh.bookmarks || []
+      version: b.version || 0,
+      nodes: b.nodes || []
     });
   };
 
@@ -3562,7 +3788,7 @@ app.get('/api/me/bookmarks/wait', deviceAuth, (req, res) => {
     res.json({ changed: false, version: current });
   }, 25000);
 
-  const entry = { send, timer, device: req.device.dev };
+  const entry = { send, timer, device: req.device.dev, profileId: key };
   if (!bookmarkWaiters.has(user.id)) bookmarkWaiters.set(user.id, []);
   bookmarkWaiters.get(user.id).push(entry);
 
@@ -3642,9 +3868,39 @@ app.post('/api/admin/users/:id/sessions/clear', requireAdmin, (req, res) => {
 //   2. host it anywhere public (GitHub Release, Drive direct link, your server)
 //   3. POST the versionCode / versionName / URL here
 
-app.get('/api/app/version', (req, res) => {
+/*
+  ---------------------------------------------------------------- channels
+
+  Two release channels: `live` (everyone) and `beta` (the test build).
+
+  A device says which one it is on with ?channel=beta. Anything else — a
+  missing parameter, a typo, an older build that predates channels — is
+  treated as `live`, because the alternative is an old device silently
+  stopping updates.
+*/
+const CHANNELS = ['live', 'beta'];
+
+function channelOf(value) {
+  const c = String(value || '').trim().toLowerCase();
+  return c === 'beta' ? 'beta' : 'live';
+}
+
+/** Reads the published record for a channel. */
+function versionFor(channel) {
   const d = db();
-  const info = d.appVersion || null;
+  return channel === 'beta' ? (d.appVersionBeta || null) : (d.appVersion || null);
+}
+
+/** Writes the published record for a channel. */
+function setVersionFor(channel, record) {
+  const d = db();
+  if (channel === 'beta') d.appVersionBeta = record;
+  else d.appVersion = record;
+}
+
+app.get('/api/app/version', (req, res) => {
+  const channel = channelOf(req.query.channel);
+  const info = versionFor(channel);
 
   // "Available" means either platform has something published. Gating on
   // versionCode alone hid a desktop-only release from every laptop, because
@@ -3653,11 +3909,12 @@ app.get('/api/app/version', (req, res) => {
   const hasDesktop = !!(info && info.desktopUrl && info.desktopVersion);
 
   if (!info || (!hasAndroid && !hasDesktop)) {
-    return res.json({ available: false });
+    return res.json({ available: false, channel });
   }
 
   res.json({
     available: true,
+    channel,
     versionCode: info.versionCode || 0,
     versionName: info.versionName || '',
     apkUrl: info.apkUrl || '',
@@ -3671,7 +3928,13 @@ app.get('/api/app/version', (req, res) => {
 });
 
 app.get('/api/admin/app/version', requireAdmin, (_req, res) => {
-  res.json({ appVersion: db().appVersion || null });
+  const d = db();
+  // `appVersion` keeps its old name so the existing dashboard code and any
+  // saved script that reads it carries on working unchanged.
+  res.json({
+    appVersion: d.appVersion || null,
+    appVersionBeta: d.appVersionBeta || null
+  });
 });
 
 /**
@@ -3770,6 +4033,7 @@ function verifyDownloadLink(url, label, redirects = 0) {
 
 app.post('/api/admin/app/version', requireAdmin, async (req, res) => {
   const b = req.body || {};
+  const channel = channelOf(b.channel);
   const code = parseInt(b.versionCode, 10);
 
   // Android and desktop are published together but validated apart: an
@@ -3853,8 +4117,7 @@ app.post('/api/admin/app/version', requireAdmin, async (req, res) => {
     }
   }
 
-  const d = db();
-  d.appVersion = {
+  setVersionFor(channel, {
     versionCode: Number.isInteger(code) && code > 0 ? code : 0,
     versionName: String(b.versionName || '').trim(),
     apkUrl,
@@ -3863,17 +4126,50 @@ app.post('/api/admin/app/version', requireAdmin, async (req, res) => {
     desktopMandatory: b.desktopMandatory !== false,
     mandatory: b.mandatory !== false,
     notes: String(b.notes || '').trim().slice(0, 500),
+    channel,
     publishedAt: Date.now()
-  };
+  });
   save();
-  res.json({ ok: true, appVersion: d.appVersion });
+  res.json({ ok: true, channel, appVersion: versionFor(channel) });
 });
 
-app.delete('/api/admin/app/version', requireAdmin, (_req, res) => {
-  const d = db();
-  d.appVersion = null;
+/**
+ * Copies one channel's published build onto the other.
+ *
+ * The administrator asked for this in both directions: beta -> live when a
+ * test build is judged good, and live -> beta when the beta channel has
+ * fallen behind and should simply carry what everyone else already has.
+ *
+ * It copies the RECORD, never the database — users, rules, bookmarks and
+ * history stay where they are. Only "which build should this channel offer"
+ * moves.
+ */
+app.post('/api/admin/app/version/copy', requireAdmin, (req, res) => {
+  const b = req.body || {};
+  const from = channelOf(b.from);
+  const to = channelOf(b.to);
+
+  if (from === to) {
+    return res.status(400).json({ message: 'Choose two different channels.' });
+  }
+
+  const source = versionFor(from);
+  if (!source) {
+    return res.status(400).json({
+      message: `Nothing is published on the ${from} channel yet, so there is nothing to copy.`
+    });
+  }
+
+  setVersionFor(to, { ...source, channel: to, publishedAt: Date.now() });
   save();
-  res.json({ ok: true });
+  res.json({ ok: true, from, to, appVersion: versionFor(to) });
+});
+
+app.delete('/api/admin/app/version', requireAdmin, (req, res) => {
+  const channel = channelOf(req.query.channel || (req.body || {}).channel);
+  setVersionFor(channel, null);
+  save();
+  res.json({ ok: true, channel });
 });
 
 app.get('/api/health', (_req, res) => {
@@ -3943,4 +4239,3 @@ async function start() {
 }
 
 start();
-
