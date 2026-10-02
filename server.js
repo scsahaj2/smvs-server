@@ -93,6 +93,16 @@ const DEFAULT_DB = {
   betaPeer: null,
 
   /*
+    The address every device should be talking to.
+
+    Set here, it travels down with the next policy the devices fetch, and
+    they adopt it. That is how the organisation moves to a new host without
+    reinstalling anything — and why a device must not be able to change its
+    own address.
+  */
+  managedServerUrl: '',
+
+  /*
     Browsing history reported by devices, for the administrator's emailed
     report. Capped and pruned — see recordHistory().
 
@@ -735,167 +745,128 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
 
     <div id="tabUpdate" class="card hidden">
-      <h3 style="margin-top:0;color:var(--primary)">Publish an app update</h3>
-      <p class="muted">
-        Phones check this on every launch and every time the app is reopened.
-        When the version here is higher than the version on the phone, the new
-        APK downloads automatically in the background.
-      </p>
-      <div class="banner">
-        <b>One tap is unavoidable.</b> Android only lets system apps install
-        updates with no confirmation at all. The phone will show a single
-        "Update?" screen once the download finishes. Everything before that is
-        automatic, and a mandatory update blocks browsing until it is applied.
-      </div>
+      <h3 style="margin-top:0;color:var(--primary)">App update</h3>
 
-      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>Release channel</b>
+      <!-- ============ STEP 1 ============ -->
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:16px">
+        <b>&#9312; &nbsp;Where every device connects</b>
         <p class="muted" style="margin:6px 0 10px">
-          <b>Live</b> is every device in the school. <b>Beta</b> is the separate
-          test build. Each channel remembers its own version, so publishing to
-          one never touches the other.
+          Change this and every phone and computer moves to the new address by
+          itself, within a second. Nobody has to reinstall anything, and users
+          cannot change it themselves.
         </p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <button id="chanLiveBtn" class="primary" style="font-size:13px"
-                  onclick="switchChannel('live')">Live</button>
-          <button id="chanBetaBtn" class="secondary" style="font-size:13px"
-                  onclick="switchChannel('beta')">Beta</button>
+        <input id="srvUrl" placeholder="https://smvs-browser.onrender.com">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+          <button class="primary" style="font-size:13px" onclick="saveServerUrl()">Save &amp; send to all devices</button>
         </div>
+        <p id="srvStatus" class="muted" style="margin-top:10px"></p>
       </div>
 
-      <div class="row" style="margin-bottom:14px">
-        <div style="background:var(--bg);border-radius:10px;padding:14px">
-          <b>&#128994; Live channel</b>
-          <div id="liveVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
-          <button class="danger" style="margin-top:10px;font-size:12px"
-                  onclick="unpublishVersion('live')">Unpublish live</button>
-        </div>
-        <div style="background:var(--bg);border-radius:10px;padding:14px">
-          <b>&#128309; Beta channel</b>
-          <div id="betaVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
-          <button class="danger" style="margin-top:10px;font-size:12px"
-                  onclick="unpublishVersion('beta')">Unpublish beta</button>
-        </div>
-      </div>
-
-      <!-- ---- where the beta channel actually goes ---- -->
-      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>&#128309; Beta server</b>
+      <!-- ============ STEP 2 ============ -->
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:16px">
+        <b>&#9313; &nbsp;Publish a new version</b>
         <p class="muted" style="margin:6px 0 10px">
-          The beta app talks to its <b>own</b> server with its own database, so
-          anything published to the beta channel has to be sent there. Enter
-          that dashboard's address and login once — after that, every beta
-          publish is forwarded automatically.
-          <br>Nothing else is copied: no users, roles, bookmarks or history.
+          Put the files on a GitHub Release first, then paste their links here.
+          <b>Leave the version number empty</b> — it is read out of the APK
+          itself, which is what stops the "update again and again" loop.
+        </p>
+
+        <label>Version name (what people see, e.g. 8.2)</label>
+        <input id="uVersionName" placeholder="8.2">
+        <input id="uVersionCode" type="hidden">
+
+        <div class="row" style="margin-top:14px">
+          <!-- ---- live ---- -->
+          <div style="background:var(--surface);border-radius:10px;padding:12px">
+            <b>&#128994; For everyone (LIVE)</b>
+            <label style="margin-top:8px">Android APK link</label>
+            <input id="uApkUrl" placeholder=".../SMVS-Browser-v8.2.apk">
+            <label style="margin-top:8px">Windows installer link</label>
+            <input id="uDesktopUrl" placeholder=".../SMVS-Browser-Setup-3.9.0.exe">
+            <label style="margin-top:8px">Windows version</label>
+            <input id="uDesktopVersion" placeholder="3.9.0">
+            <button class="primary" style="width:100%;margin-top:12px;font-size:13px"
+                    onclick="publishTo('live')">Publish to LIVE</button>
+          </div>
+
+          <!-- ---- beta ---- -->
+          <div style="background:var(--surface);border-radius:10px;padding:12px">
+            <b>&#128309; For test devices (BETA)</b>
+            <label style="margin-top:8px">Android APK link <span class="muted">(the BETA file)</span></label>
+            <input id="bApkUrl" placeholder=".../SMVS-Browser-BETA-v8.2.apk">
+            <label style="margin-top:8px">Windows installer link <span class="muted">(the Beta file)</span></label>
+            <input id="bDesktopUrl" placeholder=".../SMVS-Browser-Beta-Setup-3.9.0.exe">
+            <label style="margin-top:8px">Windows version</label>
+            <input id="bDesktopVersion" placeholder="3.9.0">
+            <button class="primary" style="width:100%;margin-top:12px;font-size:13px"
+                    onclick="publishTo('beta')">Publish to BETA</button>
+          </div>
+        </div>
+
+        <label style="margin-top:14px">What changed (optional)</label>
+        <input id="uNotes" placeholder="Fixed the logo and the update loop">
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
+          <input type="checkbox" id="uMandatory" checked style="width:auto">
+          <span style="color:var(--text);font-size:14px">
+            Required &mdash; block browsing until it is installed
+          </span>
+        </label>
+        <p id="updateErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
+
+        <div class="banner" style="margin-top:14px">
+          <b>Why two sets of links?</b> The beta app is a different app as far as
+          Android and Windows are concerned, so it needs its own file built from
+          the same code. Handing beta the live file would look like it worked
+          and update nobody. Nothing is ever sent from one channel to the other
+          on its own &mdash; only when you press one of these buttons.
+        </div>
+      </div>
+
+      <!-- ============ STEP 3 ============ -->
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:16px">
+        <b>&#9314; &nbsp;What each channel is offering right now</b>
+        <div class="row" style="margin-top:10px">
+          <div style="background:var(--surface);border-radius:10px;padding:12px">
+            <b>&#128994; Live</b>
+            <div id="liveVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
+            <button class="danger" style="margin-top:10px;font-size:12px"
+                    onclick="unpublishVersion('live')">Stop offering it</button>
+          </div>
+          <div style="background:var(--surface);border-radius:10px;padding:12px">
+            <b>&#128309; Beta</b>
+            <div id="betaVersionText" class="muted" style="margin-top:6px">Nothing published yet.</div>
+            <button class="danger" style="margin-top:10px;font-size:12px"
+                    onclick="unpublishVersion('beta')">Stop offering it</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ beta server, set once ============ -->
+      <details style="background:var(--bg);border-radius:10px;padding:14px">
+        <summary style="cursor:pointer;font-weight:600">
+          Beta server connection &mdash; set once, then forget
+        </summary>
+        <p class="muted" style="margin:10px 0">
+          The beta app talks to its own server with its own database. Give this
+          dashboard the address and login once, and "Publish to BETA" reaches it.
+          <br>Only the version and the links are sent &mdash; never users,
+          bookmarks or history.
         </p>
         <div class="row">
-          <div>
-            <label>Beta server address</label>
-            <input id="peerUrl" placeholder="https://smvs-browser-beta.onrender.com">
-          </div>
-          <div>
-            <label>Beta dashboard username</label>
-            <input id="peerUser" placeholder="admin">
-          </div>
+          <div><label>Beta server address</label>
+            <input id="peerUrl" placeholder="https://smvs-browser-beta.onrender.com"></div>
+          <div><label>Beta dashboard username</label>
+            <input id="peerUser" placeholder="admin"></div>
         </div>
         <label style="margin-top:10px">Beta dashboard password</label>
         <input id="peerPass" type="password" placeholder="leave blank to keep the saved one">
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
           <button class="primary" style="font-size:13px" onclick="savePeer()">Save</button>
           <button class="secondary" style="font-size:13px" onclick="testPeer()">Test connection</button>
-          <button class="secondary" style="font-size:13px" onclick="pushPeer()">Send beta build now</button>
           <button class="danger" style="font-size:13px" onclick="forgetPeer()">Forget</button>
         </div>
         <p id="peerStatus" class="muted" style="margin-top:10px">Not configured yet.</p>
-      </div>
-
-      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>Move a build between channels</b>
-        <p class="muted" style="margin:6px 0 10px">
-          Copies only <i>which build that channel offers</i> — the version
-          number and the download links. Users, roles, bookmarks, profiles and
-          history are never copied.
-        </p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <button class="secondary" style="font-size:13px"
-                  onclick="copyChannel('beta','live')">Beta &rarr; Live</button>
-          <button class="secondary" style="font-size:13px"
-                  onclick="copyChannel('live','beta')">Live &rarr; Beta</button>
-        </div>
-      </div>
-
-      <h4 style="margin:18px 0 4px;color:var(--primary);font-size:13px">
-        &#128241; Android (phones and tablets)
-      </h4>
-      <div class="row">
-        <div>
-          <label>Version code (whole number, must increase)</label>
-          <input id="uVersionCode" type="number" min="1" placeholder="leave empty — read from the APK">
-        </div>
-        <div>
-          <label>Version name (shown to users)</label>
-          <input id="uVersionName" placeholder="6.1">
-        </div>
-      </div>
-      <label>APK download link (direct link ending in .apk)</label>
-      <input id="uApkUrl" placeholder="https://github.com/you/repo/releases/download/v6.1/app.apk">
-
-      <!--
-        The commonest support question was not "what does this field mean" but
-        "where do I get the link". Answering it inline removes the guesswork,
-        and naming the wrong-link trap saves a failed publish.
-      -->
-      <details style="margin-top:8px">
-        <summary style="cursor:pointer;font-size:13px;color:var(--primary)">
-          Where do I get this link?
-        </summary>
-        <ol class="muted" style="margin:8px 0 0 18px;line-height:1.7">
-          <li>Open your GitHub repository &rarr; <b>Releases</b> &rarr;
-              <b>Create a new release</b></li>
-          <li>Give it a tag such as <code>v6.2</code> and publish it</li>
-          <li>Drag the <code>.apk</code> file into
-              <b>&ldquo;Attach binaries&rdquo;</b> and wait for the upload</li>
-          <li>Right-click the uploaded file &rarr; <b>Copy link address</b></li>
-          <li>Paste it above</li>
-        </ol>
-        <p class="muted" style="margin:8px 0 0">
-          &#9888; The link must contain <code>/releases/download/</code>.
-          A <code>/blob/</code> or <code>/releases/tag/</code> link points at a
-          web page, not the file, and the download will fail.
-        </p>
       </details>
-
-      <h4 style="margin:22px 0 4px;color:var(--primary);font-size:13px">
-        &#128187; Windows (computers)
-      </h4>
-      <div class="row">
-        <div>
-          <label>Desktop version (like 2.1.0)</label>
-          <input id="uDesktopVersion" placeholder="2.1.0">
-        </div>
-        <div>
-          <label>Installer link (direct link ending in .exe)</label>
-          <input id="uDesktopUrl" placeholder="https://…/SMVS-Browser-Setup-2.1.0.exe">
-        </div>
-      </div>
-      <p class="muted" style="margin-top:6px">
-        Computers download and install this by themselves — nobody has to run
-        the installer by hand. Leave both boxes empty to publish an Android-only
-        update.
-      </p>
-
-      <label style="margin-top:18px">What changed (optional)</label>
-      <input id="uNotes" placeholder="Fixed login issue">
-      <label style="display:flex;align-items:center;gap:8px;margin-top:12px">
-        <input type="checkbox" id="uMandatory" checked style="width:auto">
-        <span style="color:var(--text);font-size:14px">
-          Mandatory — block browsing until the update is applied
-        </span>
-      </label>
-      <p id="updateErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
-      <button id="publishBtn" class="primary" style="margin-top:16px" onclick="publishVersion()">
-        Publish update to all devices
-      </button>
     </div>
 
     <div id="tabReports" class="card hidden">
@@ -908,36 +879,47 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </p>
 
       <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>&#9993; Email account to send from</b>
+        <b>&#9993; How the reports are emailed</b>
         <p class="muted" style="margin:6px 0 10px">
-          Just type the email address. Gmail, Outlook, Yahoo, Zoho, Rediffmail,
-          iCloud and Google Workspace / Microsoft 365 domains are recognised and
-          set up for you.
-          <br><b>Gmail and Yahoo need an App Password</b>, not your normal password.
+          <b>Render's free plan blocks SMTP</b> (ports 25, 465 and 587), so Gmail
+          and the like cannot work from there — that is what
+          "Could not reach the mail server" means. <b>Brevo</b> sends over
+          ordinary HTTPS instead: free, no card, and set up in two minutes.
         </p>
-        <div class="row">
-          <div>
-            <label>Email address to send from</label>
-            <input id="mailUser" placeholder="you@gmail.com" oninput="suggestMail()">
-          </div>
-          <div>
-            <label>Shown as (optional)</label>
-            <input id="mailFrom" placeholder="same as the address above">
-          </div>
+
+        <label>How to send</label>
+        <select id="mailProvider" onchange="paintMailProvider()">
+          <option value="brevo">Brevo &mdash; free, works on Render (recommended)</option>
+          <option value="resend">Resend &mdash; free, works on Render</option>
+          <option value="smtp">SMTP / Gmail &mdash; only on a paid host</option>
+        </select>
+
+        <label style="margin-top:10px">Email address the reports come from</label>
+        <input id="mailFrom" placeholder="principal@school.org" oninput="suggestMail()">
+
+        <div id="mailKeyBox">
+          <label style="margin-top:10px">API key</label>
+          <input id="mailKey" type="password" placeholder="leave blank to keep the saved one">
+          <p id="mailKeyHelp" class="muted" style="margin:8px 0 0"></p>
         </div>
-        <p id="mailAuto" class="muted" style="margin:8px 0 0">
-          Type the address and the server settings fill themselves in.
-        </p>
-        <div class="row" id="mailServerRow" style="margin-top:8px">
-          <div><label>SMTP host</label><input id="mailHost" placeholder="filled in automatically"></div>
-          <div><label>Port</label><input id="mailPort" placeholder="587"></div>
+
+        <div id="mailSmtpBox" class="hidden">
+          <p id="mailAuto" class="muted" style="margin:8px 0 0">
+            Type the address and the server settings fill themselves in.
+          </p>
+          <div class="row" style="margin-top:8px">
+            <div><label>SMTP host</label><input id="mailHost" placeholder="filled in automatically"></div>
+            <div><label>Port</label><input id="mailPort" placeholder="587"></div>
+          </div>
+          <label style="margin-top:10px">Password / App Password</label>
+          <input id="mailPass" type="password" placeholder="leave blank to keep the saved one">
+          <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
+            <input type="checkbox" id="mailSecure" style="width:auto">
+            <span style="color:var(--text);font-size:14px">Use SSL (port 465)</span>
+          </label>
+          <input id="mailUser" type="hidden">
         </div>
-        <label style="margin-top:10px">Password / App Password</label>
-        <input id="mailPass" type="password" placeholder="leave blank to keep the saved one">
-        <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
-          <input type="checkbox" id="mailSecure" style="width:auto">
-          <span style="color:var(--text);font-size:14px">Use SSL (port 465)</span>
-        </label>
+
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
           <button class="primary" style="font-size:13px" onclick="saveMail()">Save</button>
           <button class="secondary" style="font-size:13px" onclick="testMail()">Send a test email</button>
@@ -1965,40 +1947,54 @@ function showTab(which) {
     if (panel) panel.classList.toggle('hidden', which !== t);
     if (btn) btn.classList.toggle('active', which === t);
   });
-  if (which === 'update') { loadVersion(); loadPeer(); }
+  if (which === 'update') { loadServerUrl(); loadVersion(); loadPeer(); }
   if (which === 'roles') renderRoles();
   if (which === 'devices') loadDevices();
   if (which === 'admins') loadAdmins();
   if (which === 'reports') { loadMail(); loadReports(); }
 }
 
-/* Which channel the publish form is pointed at. */
-var updChannel = 'live';
+/* ------------------------------------------------ step 1: server address */
 
-function switchChannel(c) {
-  updChannel = (c === 'beta') ? 'beta' : 'live';
-  $('chanLiveBtn').className = (updChannel === 'live') ? 'primary' : 'secondary';
-  $('chanBetaBtn').className = (updChannel === 'beta') ? 'primary' : 'secondary';
-  $('publishBtn').textContent = (updChannel === 'beta')
-    ? 'Publish update to BETA devices'
-    : 'Publish update to all devices';
-  loadVersion();
+async function loadServerUrl() {
+  try {
+    const d = await api('/api/admin/server-url');
+    $('srvUrl').value = d.serverUrl || '';
+    $('srvStatus').textContent = d.serverUrl
+      ? d.devices + ' device(s) registered, ' + d.seen + ' seen in the last week.'
+      : 'Not set — devices keep using the address built into the app.';
+  } catch (e) { /* non-fatal */ }
 }
+
+async function saveServerUrl() {
+  const url = $('srvUrl').value.trim();
+  if (url && !confirm('Send this address to every device?\\n\\n' + url +
+      '\\n\\nThey will move to it within a second. Make sure it is correct.')) return;
+  try {
+    const r = await api('/api/admin/server-url', {
+      method: 'PUT', body: JSON.stringify({ serverUrl: url })
+    });
+    $('srvStatus').textContent = 'Sent to ' + r.devicesNotified + ' device(s).';
+    toast('Address sent to all devices');
+  } catch (e) { alert(e.message); }
+}
+
+/* ------------------------------------------------ step 2 and 3: versions */
 
 function describeVersion(v) {
   if (!v) return 'Nothing published yet.';
   const lines = [];
   if (v.apkUrl) {
     lines.push('&#128241; <b>Android</b> ' + esc(v.versionName || String(v.versionCode)) +
-      ' (code ' + v.versionCode + ')<br><span class="muted">' + esc(v.apkUrl) + '</span>');
+      ' (code ' + v.versionCode + ')' +
+      (v.apkPackage ? '<br><span class="muted">' + esc(v.apkPackage) + '</span>' : ''));
   }
   if (v.desktopUrl) {
-    lines.push('&#128187; <b>Windows</b> ' + esc(v.desktopVersion) +
-      '<br><span class="muted">' + esc(v.desktopUrl) + '</span>');
+    lines.push('&#128187; <b>Windows</b> ' + esc(v.desktopVersion));
   }
-  lines.push((v.mandatory ? 'Mandatory' : 'Optional') +
-    ' &middot; published ' + new Date(v.publishedAt).toLocaleString());
-  return lines.join('<br><br>');
+  lines.push((v.mandatory ? 'Required' : 'Optional') +
+    ' &middot; ' + new Date(v.publishedAt).toLocaleString());
+  return lines.join('<br>');
 }
 
 async function loadVersion() {
@@ -2007,308 +2003,61 @@ async function loadVersion() {
     $('liveVersionText').innerHTML = describeVersion(d.appVersion);
     $('betaVersionText').innerHTML = describeVersion(d.appVersionBeta);
 
-    const v = (updChannel === 'beta') ? d.appVersionBeta : d.appVersion;
-    if (!v) {
-      $('uVersionCode').value = '';
-      $('uVersionName').value = '';
-      $('uApkUrl').value = '';
-      $('uDesktopVersion').value = '';
-      $('uDesktopUrl').value = '';
-      return;
+    // Pre-fill each side with what it is already carrying, so a small change
+    // does not mean retyping four links.
+    if (d.appVersion) {
+      $('uApkUrl').value = d.appVersion.apkUrl || '';
+      $('uDesktopUrl').value = d.appVersion.desktopUrl || '';
+      $('uDesktopVersion').value = d.appVersion.desktopVersion || '';
+      $('uMandatory').checked = d.appVersion.mandatory !== false;
     }
-    // Deliberately NOT v.versionCode + 1. That helpful-looking guess is
-    // exactly how 29 came to be published for an APK that was really 28.
-    // Left blank, the server reads the true number out of the file.
-    $('uVersionCode').value = '';
-    $('uVersionName').value = '';
-    $('uApkUrl').value = v.apkUrl || '';
-    $('uDesktopVersion').value = v.desktopVersion || '';
-    $('uDesktopUrl').value = v.desktopUrl || '';
-    $('uMandatory').checked = v.mandatory !== false;
-  } catch (e) { /* non-fatal */ }
-}
-
-async function loadMail() {
-  try {
-    const m = await api('/api/admin/mail');
-    $('mailHost').value = m.host || '';
-    $('mailPort').value = m.port || 587;
-    $('mailUser').value = m.user || '';
-    $('mailFrom').value = m.from || '';
-    $('mailSecure').checked = !!m.secure;
-    $('mailStatus').textContent = m.configured
-      ? 'Sending as ' + (m.from || m.user)
-      : 'Not set up yet.';
-    if (m.user) doSuggestMail();
-  } catch (e) { /* non-fatal */ }
-}
-
-/*
-  Fills the server settings in from the address.
-
-  The two boxes are locked while they are filled in automatically: a value
-  that was worked out for you, and that you can then half-edit, is worse than
-  either a fixed value or an empty one. They unlock the moment the provider
-  cannot be identified.
-*/
-var mailSuggestTimer = null;
-
-function setServerFieldsLocked(locked) {
-  for (const id of ['mailHost', 'mailPort']) {
-    const el = $(id);
-    el.readOnly = locked;
-    el.style.background = locked ? 'var(--bg)' : '';
-    el.style.color = locked ? 'var(--muted, #667)' : '';
-  }
-  $('mailSecure').disabled = locked;
-}
-
-function suggestMail() {
-  clearTimeout(mailSuggestTimer);
-  mailSuggestTimer = setTimeout(doSuggestMail, 450);
-}
-
-async function doSuggestMail() {
-  const email = $('mailUser').value.trim();
-  if (email.indexOf('@') < 1) {
-    $('mailAuto').textContent = 'Type the address and the server settings fill themselves in.';
-    setServerFieldsLocked(false);
-    return;
-  }
-  $('mailAuto').textContent = 'Looking up ' + email.split('@')[1] + '…';
-  try {
-    const r = await api('/api/admin/mail/suggest?email=' + encodeURIComponent(email));
-    if (r.known) {
-      $('mailHost').value = r.host;
-      $('mailPort').value = r.port;
-      $('mailSecure').checked = !!r.secure;
-      setServerFieldsLocked(true);
-      $('mailAuto').innerHTML = '&#10003; ' + esc(r.label) + ' recognised — settings filled in' +
-        (r.note ? '. <b>' + esc(r.note) + '</b>' : '.');
-    } else {
-      if (r.guessHost && !$('mailHost').value) {
-        $('mailHost').value = r.guessHost;
-        $('mailPort').value = r.guessPort || 587;
-      }
-      setServerFieldsLocked(false);
-      $('mailAuto').textContent =
-        (r.reason || 'Provider not recognised.') +
-        ' Please enter the SMTP host and port yourself' +
-        (r.mx && r.mx.length ? ' (its mail servers: ' + r.mx.join(', ') + ').' : '.');
+    if (d.appVersionBeta) {
+      $('bApkUrl').value = d.appVersionBeta.apkUrl || '';
+      $('bDesktopUrl').value = d.appVersionBeta.desktopUrl || '';
+      $('bDesktopVersion').value = d.appVersionBeta.desktopVersion || '';
     }
-  } catch (e) {
-    setServerFieldsLocked(false);
-    $('mailAuto').textContent = 'Could not look that up — enter the host and port yourself.';
-  }
-}
-
-async function saveMail() {
-  try {
-    await api('/api/admin/mail', {
-      method: 'PUT',
-      body: JSON.stringify({
-        host: $('mailHost').value.trim(),
-        port: parseInt($('mailPort').value, 10) || 587,
-        user: $('mailUser').value.trim(),
-        from: $('mailFrom').value.trim() || $('mailUser').value.trim(),
-        pass: $('mailPass').value,
-        secure: $('mailSecure').checked
-      })
-    });
-    $('mailPass').value = '';
-    toast('Email settings saved');
-    await loadMail();
-  } catch (e) { alert(e.message); }
-}
-
-async function testMail() {
-  const to = prompt('Send a test email to which address?', $('mailFrom').value || '');
-  if (!to) return;
-  $('mailStatus').textContent = 'Sending…';
-  try {
-    const r = await api('/api/admin/mail/test', { method: 'POST', body: JSON.stringify({ to: to }) });
-    $('mailStatus').textContent = r.message;
-  } catch (e) { $('mailStatus').innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + '</span>'; }
-}
-
-async function loadReports() {
-  try {
-    const d = await api('/api/admin/reports');
-    const list = $('reportList');
-    if (!d.reports.length) {
-      list.innerHTML = '<p class="muted">No schedules yet.</p>';
-    } else {
-      list.innerHTML = d.reports.map(function (r) {
-        const last = r.lastSentAt ? new Date(r.lastSentAt).toLocaleString() : 'not yet';
-        const next = r.lastSentAt
-          ? new Date(r.lastSentAt + r.everyDays * 86400000).toLocaleDateString()
-          : 'after the first period';
-        return '<div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:10px">' +
-          '<b>' + esc(r.email) + '</b>' +
-          (r.enabled === false ? ' <span class="muted">(disabled)</span>' : '') +
-          (r.label ? '<br><span class="muted">' + esc(r.label) + '</span>' : '') +
-          '<div class="muted" style="margin-top:6px">Every ' + r.everyDays + ' days &middot; ' +
-          (r.devices && r.devices.length ? esc(r.devices.join(', ')) : 'all devices') +
-          '<br>Last sent: ' + esc(last) + ' &middot; next: ' + esc(next) + '</div>' +
-          (r.lastError ? '<div style="color:var(--danger);font-size:12px;margin-top:6px">' +
-            esc(r.lastError) + '</div>' : '') +
-          '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">' +
-          '<button class="secondary" style="font-size:12px" onclick="previewReport(\\'' + r.id + '\\')">Preview</button>' +
-          '<button class="secondary" style="font-size:12px" onclick="sendReport(\\'' + r.id + '\\')">Send now</button>' +
-          '<button class="secondary" style="font-size:12px" onclick="toggleReport(\\'' + r.id + '\\',' +
-            (r.enabled === false) + ')">' + (r.enabled === false ? 'Enable' : 'Disable') + '</button>' +
-          '<button class="danger" style="font-size:12px" onclick="deleteReport(\\'' + r.id + '\\')">Delete</button>' +
-          '</div></div>';
-      }).join('');
-    }
-    $('reportFoot').textContent =
-      d.historyRows + ' visits stored' +
-      (d.knownDevices.length ? ' from: ' + d.knownDevices.join(', ') : '') +
-      (d.mailConfigured ? '' : ' — email is not set up yet, so nothing can be sent.');
   } catch (e) { /* non-fatal */ }
 }
 
-async function addReport() {
-  const err = $('repErr');
-  err.classList.add('hidden');
-  try {
-    await api('/api/admin/reports', {
-      method: 'POST',
-      body: JSON.stringify({
-        email: $('repEmail').value.trim(),
-        everyDays: parseInt($('repDays').value, 10) || 15,
-        label: $('repLabel').value.trim(),
-        devices: $('repDevices').value.split(',').map(function (v) { return v.trim(); }).filter(Boolean)
-      })
-    });
-    $('repEmail').value = ''; $('repLabel').value = ''; $('repDevices').value = '';
-    toast('Schedule added');
-    await loadReports();
-  } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
-}
-
-async function toggleReport(id, enable) {
-  try {
-    await api('/api/admin/reports/' + id, { method: 'PUT', body: JSON.stringify({ enabled: enable }) });
-    await loadReports();
-  } catch (e) { alert(e.message); }
-}
-
-async function deleteReport(id) {
-  if (!confirm('Delete this schedule?')) return;
-  try {
-    await api('/api/admin/reports/' + id, { method: 'DELETE' });
-    await loadReports();
-  } catch (e) { alert(e.message); }
-}
-
-async function sendReport(id) {
-  try {
-    const r = await api('/api/admin/reports/' + id + '/send', { method: 'POST' });
-    toast(r.message + ' (' + r.rows + ' visits)');
-    await loadReports();
-  } catch (e) { alert(e.message); }
-}
-
-function previewReport(id) {
-  window.open('/api/admin/reports/' + id + '/preview?token=' + encodeURIComponent(token), '_blank');
-}
-
-async function loadPeer() {
-  try {
-    const p = await api('/api/admin/peer/beta');
-    $('peerUrl').value = p.url || '';
-    $('peerUser').value = p.username || 'admin';
-    const el = $('peerStatus');
-    if (!p.configured) { el.textContent = 'Not configured yet.'; return; }
-    const when = p.lastPublishAt ? new Date(p.lastPublishAt).toLocaleString() : 'never';
-    el.innerHTML = p.lastError
-      ? '<span style="color:var(--danger)">Last attempt failed: ' + esc(p.lastError) + '</span>'
-      : 'Connected to ' + esc(p.url) + ' &middot; last sent: ' + esc(when);
-  } catch (e) { /* non-fatal */ }
-}
-
-async function savePeer() {
-  try {
-    await api('/api/admin/peer/beta', {
-      method: 'PUT',
-      body: JSON.stringify({
-        url: $('peerUrl').value.trim(),
-        username: $('peerUser').value.trim(),
-        password: $('peerPass').value
-      })
-    });
-    $('peerPass').value = '';
-    toast('Beta server saved');
-    await loadPeer();
-  } catch (e) { alert(e.message); }
-}
-
-async function testPeer() {
-  $('peerStatus').textContent = 'Testing… a sleeping free server can take up to a minute.';
-  try {
-    const r = await api('/api/admin/peer/beta/test', { method: 'POST' });
-    $('peerStatus').textContent = r.message +
-      (r.durable ? ' Its database is durable.' : ' WARNING: its database is NOT durable.');
-  } catch (e) { $('peerStatus').innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + '</span>'; }
-}
-
-async function pushPeer() {
-  $('peerStatus').textContent = 'Sending…';
-  try {
-    const r = await api('/api/admin/peer/beta/push', { method: 'POST' });
-    $('peerStatus').textContent = r.message;
-    toast('Sent to the beta server');
-  } catch (e) { $('peerStatus').innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + '</span>'; }
-}
-
-async function forgetPeer() {
-  if (!confirm('Forget the beta server connection?')) return;
-  try {
-    await api('/api/admin/peer/beta', { method: 'DELETE' });
-    $('peerUrl').value = ''; $('peerPass').value = '';
-    $('peerStatus').textContent = 'Not configured yet.';
-    toast('Forgotten');
-  } catch (e) { alert(e.message); }
-}
-
-async function copyChannel(from, to) {
-  const msg = 'Copy the ' + from + ' build onto the ' + to +
-    ' channel?\\n\\nOnly the version number and download links move. ' +
-    'No user data is copied.';
-  if (!confirm(msg)) return;
-  try {
-    await api('/api/admin/app/version/copy', {
-      method: 'POST',
-      body: JSON.stringify({ from: from, to: to })
-    });
-    toast('Copied ' + from + ' to ' + to);
-    await loadVersion();
-    if (to === 'beta') await loadPeer();
-  } catch (e) { alert(e.message); }
-}
-
-async function publishVersion() {
+/**
+ * One button per channel, each with its own files.
+ *
+ * This replaced a "copy live to beta" button. Copying could only ever move
+ * the live FILE onto the beta channel, and Android will not install that over
+ * the beta app — so it looked like it had worked and updated nobody. Naming
+ * the beta file explicitly is the only honest version of the same action.
+ */
+async function publishTo(channel) {
   const err = $('updateErr');
   err.classList.add('hidden');
+  const beta = channel === 'beta';
+
+  const body = {
+    channel: channel,
+    versionCode: '',                       // read from the APK by the server
+    versionName: $('uVersionName').value.trim(),
+    apkUrl: (beta ? $('bApkUrl') : $('uApkUrl')).value.trim(),
+    desktopUrl: (beta ? $('bDesktopUrl') : $('uDesktopUrl')).value.trim(),
+    desktopVersion: (beta ? $('bDesktopVersion') : $('uDesktopVersion')).value.trim(),
+    desktopMandatory: $('uMandatory').checked,
+    mandatory: $('uMandatory').checked,
+    notes: $('uNotes').value.trim()
+  };
+
+  if (!body.apkUrl && !body.desktopUrl) {
+    err.textContent = 'Add at least one link for the ' + channel + ' side.';
+    err.classList.remove('hidden');
+    return;
+  }
+
   try {
-    await api('/api/admin/app/version', {
-      method: 'POST',
-      body: JSON.stringify({
-        channel: updChannel,
-        versionCode: parseInt($('uVersionCode').value, 10),
-        versionName: $('uVersionName').value.trim(),
-        apkUrl: $('uApkUrl').value.trim(),
-        desktopVersion: $('uDesktopVersion').value.trim(),
-        desktopUrl: $('uDesktopUrl').value.trim(),
-        desktopMandatory: $('uMandatory').checked,
-        notes: $('uNotes').value.trim(),
-        mandatory: $('uMandatory').checked
-      })
-    });
-    toast('Published to ' + updChannel + ' — devices will pick it up automatically');
-    if (updChannel === 'beta') await loadPeer();
+    const r = await api('/api/admin/app/version', { method: 'POST', body: JSON.stringify(body) });
+    let msg = 'Published to ' + channel.toUpperCase();
+    if (r.verifiedVersionCode) msg += ' (version code ' + r.verifiedVersionCode + ')';
+    if (beta && r.peer) msg += r.peer.ok ? ' and sent to the beta server' : ' — ' + r.peer.message;
+    toast(msg);
     await loadVersion();
+    if (beta) await loadPeer();
   } catch (e) {
     err.textContent = e.message;
     err.classList.remove('hidden');
@@ -2812,6 +2561,17 @@ function policyOf(u) {
 
   return {
     mode: u.mode || 'category',
+
+    /*
+      The address every device should be using.
+
+      Travels with the policy rather than in its own call: devices already
+      fetch this on every launch and hold a long poll for changes, so a new
+      address lands within a second of the admin saving it — with no extra
+      request and nothing new to keep working.
+    */
+    serverUrl: db().managedServerUrl || '',
+
     // Site lists and time rules are always per-user: they name specific
     // websites, which is not something a shared role should dictate.
     allowedPatterns: u.allowedPatterns || [],
@@ -5268,13 +5028,116 @@ function smtpSend(cfg, { to, subject, html, text }) {
   });
 }
 
+/*
+  ---------------------------------------------- sending over HTTPS instead
+
+  Why this exists: Render's free web services block outbound traffic to the
+  SMTP ports (25, 465 and 587) at the firewall, and have done since
+  26 September 2025. The connection is dropped rather than refused, so it
+  shows up as ETIMEDOUT after a long wait — which looks exactly like a wrong
+  password or a typo in the host, and sent us looking in the wrong place.
+
+  An email API speaks ordinary HTTPS on port 443, which is not blocked. Both
+  of the ones below have a free tier that needs no card, so nothing has to be
+  paid for to make reports work.
+*/
+function httpsJson(url, { method = 'POST', headers = {}, body = null, timeoutMs = 30000 }) {
+  return new Promise(resolve => {
+    let target;
+    try { target = new URL(url); } catch { return resolve({ ok: false, message: 'Bad URL' }); }
+    const payload = body ? JSON.stringify(body) : null;
+    const req = https.request(target, {
+      method,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'SMVS-Browser-Server',
+        ...(payload ? { 'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(payload) } : {}),
+        ...headers
+      },
+      timeout: timeoutMs
+    }, response => {
+      let raw = '';
+      response.on('data', c => { raw += c; });
+      response.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(raw); } catch { /* not JSON */ }
+        resolve({
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode, body: parsed, raw: raw.slice(0, 300)
+        });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, message: 'timed out' }); });
+    req.on('error', e => resolve({ ok: false, message: e.code || e.message }));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/** Brevo — free tier, no card, sender confirmed by a code sent to the address. */
+async function sendViaBrevo(cfg, { to, subject, html, text }) {
+  const r = await httpsJson('https://api.brevo.com/v3/smtp/email', {
+    headers: { 'api-key': cfg.apiKey },
+    body: {
+      sender: { email: cfg.from, name: 'SMVS Browser' },
+      to: [{ email: to }],
+      subject, htmlContent: html, textContent: text
+    }
+  });
+  if (r.ok) return { ok: true, message: 'Sent to ' + to + ' through Brevo.' };
+  const why = (r.body && (r.body.message || r.body.code)) || r.message || ('HTTP ' + r.status);
+  if (r.status === 401) {
+    return { ok: false, message: 'Brevo refused the API key. Copy it again from ' +
+      'Brevo → SMTP & API → API keys.' };
+  }
+  if (r.status === 400 && /sender/i.test(String(why))) {
+    return { ok: false, message: 'Brevo does not recognise "' + cfg.from + '" as a verified ' +
+      'sender yet. Add it in Brevo → Senders, confirm the code it emails you, then try again.' };
+  }
+  return { ok: false, message: 'Brevo refused it: ' + why };
+}
+
+/** Resend — also free to start, also plain HTTPS. */
+async function sendViaResend(cfg, { to, subject, html, text }) {
+  const r = await httpsJson('https://api.resend.com/emails', {
+    headers: { Authorization: 'Bearer ' + cfg.apiKey },
+    body: { from: 'SMVS Browser <' + cfg.from + '>', to: [to], subject, html, text }
+  });
+  if (r.ok) return { ok: true, message: 'Sent to ' + to + ' through Resend.' };
+  const why = (r.body && (r.body.message || r.body.name)) || r.message || ('HTTP ' + r.status);
+  if (r.status === 401 || r.status === 403) {
+    return { ok: false, message: 'Resend refused the API key.' };
+  }
+  return { ok: false, message: 'Resend refused it: ' + why };
+}
+
 async function sendMail({ to, subject, html, text }) {
   const cfg = db().mail;
-  if (!cfg || !cfg.host || !cfg.user) {
-    return { ok: false, message: 'Email is not set up yet — add your SMTP details first.' };
-  }
+  if (!cfg) return { ok: false, message: 'Email is not set up yet.' };
+
   try {
-    return await smtpSend(cfg, { to, subject, html, text });
+    if (cfg.provider === 'brevo')  return await sendViaBrevo(cfg,  { to, subject, html, text });
+    if (cfg.provider === 'resend') return await sendViaResend(cfg, { to, subject, html, text });
+
+    if (!cfg.host || !cfg.user) {
+      return { ok: false, message: 'Email is not set up yet — choose how to send first.' };
+    }
+    const r = await smtpSend(cfg, { to, subject, html, text });
+
+    /*
+      Turn the one failure people actually hit into an answer instead of a
+      riddle. A dropped packet on 25/465/587 is what a blocked port looks
+      like, and no amount of retrying or re-typing the password will fix it.
+    */
+    if (!r.ok && /ETIMEDOUT|timed out|did not answer/i.test(r.message || '')) {
+      return { ok: false, message:
+        'Could not reach the mail server. Free Render services block SMTP ports ' +
+        '(25, 465 and 587) at the firewall, so no SMTP settings can work there. ' +
+        'Switch "How to send" to Brevo or Resend — those send over ordinary HTTPS, ' +
+        'are free, and need no card.' };
+    }
+    return r;
   } catch (e) {
     return { ok: false, message: 'Sending failed: ' + (e.message || String(e)) };
   }
@@ -5387,8 +5250,11 @@ app.get('/api/admin/mail/suggest', requireAdmin, async (req, res) => {
 
 app.get('/api/admin/mail', requireAdmin, (_req, res) => {
   const m = db().mail;
+  const ready = !!(m && (m.provider === 'smtp' ? (m.host && m.user) : m.apiKey));
   res.json({
-    configured: !!(m && m.host && m.user),
+    provider: (m && m.provider) || 'brevo',
+    hasKey: !!(m && m.apiKey),
+    configured: ready,
     host: (m && m.host) || '',
     port: (m && m.port) || 587,
     secure: !!(m && m.secure),
@@ -5400,27 +5266,39 @@ app.get('/api/admin/mail', requireAdmin, (_req, res) => {
 
 app.put('/api/admin/mail', requireAdmin, (req, res) => {
   const b = req.body || {};
-  const host = String(b.host || '').trim();
-  const user = String(b.user || '').trim();
-  const pass = String(b.pass || '');
-  if (!host || !user) return res.status(400).json({ message: 'SMTP host and username are both needed.' });
-
   const d = db();
   const existing = d.mail || {};
-  if (!pass && !existing.pass) {
-    return res.status(400).json({ message: 'Enter the SMTP password (for Gmail, an App Password).' });
+  const provider = ['brevo', 'resend', 'smtp'].includes(b.provider) ? b.provider : 'brevo';
+  const from = String(b.from || '').trim();
+
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(from)) {
+    return res.status(400).json({ message: 'Enter the email address the reports come from.' });
   }
 
+  if (provider === 'brevo' || provider === 'resend') {
+    const apiKey = String(b.apiKey || '').trim() || existing.apiKey || '';
+    if (!apiKey) {
+      return res.status(400).json({
+        message: 'Paste the API key from ' + (provider === 'brevo' ? 'Brevo' : 'Resend') + '.'
+      });
+    }
+    d.mail = { provider, from, apiKey };
+    save();
+    return res.json({ ok: true, provider });
+  }
+
+  const host = String(b.host || '').trim();
+  const user = String(b.user || '').trim() || from;
+  const pass = String(b.pass || '') || existing.pass || '';
+  if (!host) return res.status(400).json({ message: 'Enter the SMTP host.' });
+  if (!pass) return res.status(400).json({ message: 'Enter the password (for Gmail, an App Password).' });
+
   d.mail = {
-    host,
-    port: Number(b.port) || 587,
-    secure: b.secure === true,
-    user,
-    pass: pass || existing.pass,
-    from: String(b.from || '').trim() || user
+    provider: 'smtp', host, port: Number(b.port) || 587,
+    secure: b.secure === true, user, pass, from
   };
   save();
-  res.json({ ok: true });
+  res.json({ ok: true, provider: 'smtp' });
 });
 
 app.delete('/api/admin/mail', requireAdmin, (_req, res) => {
@@ -5583,6 +5461,41 @@ async function reportTick() {
 if (process.env.NODE_ENV !== 'test') {
   setInterval(reportTick, REPORT_TICK_MS).unref();
 }
+
+// ---- the address all devices should use ----
+
+app.get('/api/admin/server-url', requireAdmin, (req, res) => {
+  const d = db();
+  const devices = (d.devices || []).length;
+  res.json({
+    serverUrl: d.managedServerUrl || '',
+    // What the devices are being told right now, so the page can show the
+    // effect rather than just the setting.
+    devices,
+    seen: (d.devices || []).filter(x => (Date.now() - (x.lastSeenAt || 0)) < 7 * 86400000).length
+  });
+});
+
+app.put('/api/admin/server-url', requireAdmin, (req, res) => {
+  const raw = String((req.body || {}).serverUrl || '').trim().replace(/\/+$/, '');
+  if (raw && !/^https?:\/\//i.test(raw)) {
+    return res.status(400).json({ message: 'The address must start with https://' });
+  }
+  const d = db();
+  d.managedServerUrl = raw;
+
+  /*
+    Every device's policy revision has to move, or the long polls they are
+    already holding will not consider anything to have changed and the new
+    address would not arrive until the next restart.
+  */
+  const now = Date.now();
+  for (const u of d.users) u.updatedAt = now;
+  save();
+  notifyPolicyChanged();
+
+  res.json({ ok: true, serverUrl: raw, devicesNotified: (d.devices || []).length });
+});
 
 // ---- configuring the beta server ----
 
