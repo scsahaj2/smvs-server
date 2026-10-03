@@ -2076,8 +2076,8 @@ const MAIL_HELP = {
     '2. <b>API Keys</b> &rarr; Create API Key &rarr; paste it here. ' +
     '3. Until you verify a domain, Resend only lets you send to your own address.',
   smtp:
-    'Only choose this if your server is on a paid plan. On Render\'s free plan the ' +
-    'SMTP ports are blocked and this will always time out.'
+    'Only choose this if your server is on a paid plan. On the free Render plan ' +
+    'the SMTP ports are blocked and this will always time out.'
 };
 
 function paintMailProvider() {
