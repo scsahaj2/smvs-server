@@ -775,7 +775,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <input id="uVersionName" placeholder="8.2">
         <input id="uVersionCode" type="hidden">
 
-        <div class="row" style="margin-top:14px">
+        <!-- ---- one click ---- -->
+        <div style="background:var(--surface);border-radius:10px;padding:14px;margin-top:14px;
+                    border:2px solid var(--primary)">
+          <b>&#9889; The easy way &mdash; one button</b>
+          <p class="muted" style="margin:6px 0 10px">
+            Attach all four files to the same GitHub Release, publish to LIVE once,
+            then press this. It finds the beta-built files on that release by
+            itself, checks they really are the beta build, and publishes them.
+            Nothing is guessed: if a file is missing it tells you which name it
+            looked for.
+          </p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="primary" style="font-size:13px" onclick="promote('live','beta')">
+              Publish LIVE &rarr; BETA
+            </button>
+            <button class="secondary" style="font-size:13px" onclick="promote('beta','live')">
+              Publish BETA &rarr; LIVE
+            </button>
+          </div>
+          <p id="promoteStatus" class="muted" style="margin-top:10px"></p>
+        </div>
+
+        <p class="muted" style="margin:16px 0 0"><b>Or paste the links by hand:</b></p>
+
+        <div class="row" style="margin-top:8px">
           <!-- ---- live ---- -->
           <div style="background:var(--surface);border-radius:10px;padding:12px">
             <b>&#128994; For everyone (LIVE)</b>
@@ -2027,6 +2051,36 @@ async function loadVersion() {
  * the beta app — so it looked like it had worked and updated nobody. Naming
  * the beta file explicitly is the only honest version of the same action.
  */
+/**
+ * Sends the build already on one channel across to the other.
+ *
+ * The server does the finding and the proving; this only reports it. The
+ * manual boxes below are still there for a release that does not follow the
+ * usual naming.
+ */
+async function promote(from, to) {
+  const el = $('promoteStatus');
+  el.style.color = '';
+  el.textContent = 'Looking for the ' + to.toUpperCase() + ' files on that release…';
+  try {
+    const r = await api('/api/admin/app/version/promote', {
+      method: 'POST', body: JSON.stringify({ from: from, to: to })
+    });
+    const bits = [];
+    if (r.found.apkUrl) bits.push('Android ' + r.found.apkUrl.split('/').pop());
+    if (r.found.desktopUrl) bits.push('Windows ' + r.found.desktopUrl.split('/').pop());
+    let msg = 'Published to ' + to.toUpperCase() + ': ' + bits.join(' · ');
+    if (r.peer) msg += r.peer.ok ? ' — and sent to the beta server.' : ' — ' + r.peer.message;
+    el.textContent = msg;
+    toast('Sent ' + from + ' to ' + to);
+    await loadVersion();
+    if (to === 'beta') await loadPeer();
+  } catch (e) {
+    el.style.color = 'var(--danger)';
+    el.textContent = e.message;
+  }
+}
+
 async function publishTo(channel) {
   const err = $('updateErr');
   err.classList.add('hidden');
@@ -4669,8 +4723,10 @@ app.post('/api/admin/app/version', requireAdmin, async (req, res) => {
       return res.status(400).json({
         message:
           'That APK is the LIVE build (' + realPackage + '). A beta device cannot ' +
-          'install it — Android sees the two as different apps. Publish the beta-flavoured ' +
-          'file (package ' + realPackage + '.beta) on the beta channel instead.'
+          'install it — Android sees the two as different apps. Use the ' +
+          '"Publish LIVE -> BETA" button instead: it finds the beta-built file on the ' +
+          'same release for you. Or paste the link to the beta APK (package ' +
+          realPackage + '.beta) here.'
       });
     }
     if (channel === 'live' && isBetaBuild) {
@@ -5842,6 +5898,168 @@ app.post('/api/admin/peer/beta/push', requireAdmin, async (_req, res) => {
   const result = await publishToBetaPeer(db().appVersionBeta);
   if (!result.ok) return res.status(400).json({ message: result.message });
   res.json(result);
+});
+
+/*
+  =======================================================================
+  ONE BUTTON: promote a release from one channel to the other
+
+  The manual route works, but it means pasting four links every time. What
+  was asked for was a single button that sends "the same code" across.
+
+  It cannot literally copy the file: Android and Windows treat the beta app
+  as a different application, so beta needs its own build. What it CAN do is
+  find that build. Both are attached to the same GitHub release, and the
+  names differ by one word, so the beta file is derived from the live one
+  and then PROVED to be the right thing before anything is published:
+
+    * the APK is downloaded and its package name read — it must really end
+      in .beta (or really not, when promoting the other way);
+    * the installer is probed and must really answer with a Windows binary.
+
+  Nothing is guessed at and published blind. If the beta file is not on the
+  release, the answer says exactly which names were looked for.
+  =======================================================================
+*/
+
+/** Plausible names for the same build on the other channel. */
+function otherChannelUrls(url, toBeta) {
+  if (!url) return [];
+  const cut = url.lastIndexOf('/');
+  if (cut < 0) return [];
+  const base = url.slice(0, cut + 1);
+  const name = url.slice(cut + 1);
+  const out = [];
+  const add = n => { const u = base + n; if (n !== name && !out.includes(u)) out.push(u); };
+
+  if (toBeta) {
+    // SMVS-Browser-v8.3.apk        -> SMVS-Browser-BETA-v8.3.apk
+    add(name.replace(/-v(\d)/, '-BETA-v$1'));
+    add(name.replace(/-v(\d)/, '-Beta-v$1'));
+    // SMVS-Browser-Setup-3.10.0.exe -> SMVS-Browser-Beta-Setup-3.10.0.exe
+    add(name.replace(/-Setup-/i, '-Beta-Setup-'));
+    add(name.replace(/-Setup-/i, '-BETA-Setup-'));
+    // last resort: a word in front of the file name
+    add('BETA-' + name);
+    add('Beta-' + name);
+  } else {
+    add(name.replace(/-BETA-v/i, '-v'));
+    add(name.replace(/-Beta-Setup-/i, '-Setup-'));
+    add(name.replace(/-BETA-Setup-/i, '-Setup-'));
+    add(name.replace(/^BETA-/i, ''));
+    add(name.replace(/^Beta-/i, ''));
+  }
+  return out;
+}
+
+/** Is there a real Windows installer at this address? */
+function probeInstaller(url, redirects = 0) {
+  return new Promise(resolve => {
+    if (redirects > 5) return resolve({ ok: false });
+    let parsed;
+    try { parsed = new URL(url); } catch { return resolve({ ok: false }); }
+    const client = parsed.protocol === 'https:' ? https : http;
+    const req = client.get(url, { headers: { 'User-Agent': 'SMVS-Server' }, timeout: 30000 }, r => {
+      if ([301, 302, 303, 307, 308].includes(r.statusCode) && r.headers.location) {
+        r.resume();
+        return resolve(probeInstaller(new URL(r.headers.location, url).toString(), redirects + 1));
+      }
+      if (r.statusCode !== 200) { r.resume(); return resolve({ ok: false, status: r.statusCode }); }
+      r.once('data', chunk => {
+        const head = chunk.slice(0, 2).toString('latin1');
+        req.destroy();
+        resolve({ ok: head === 'MZ', head });
+      });
+      r.on('end', () => resolve({ ok: false }));
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false }); });
+    req.on('error', () => resolve({ ok: false }));
+  });
+}
+
+app.post('/api/admin/app/version/promote', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const from = channelOf(b.from);
+  const to = channelOf(b.to);
+  if (from === to) return res.status(400).json({ message: 'Choose two different channels.' });
+
+  const source = versionFor(from);
+  if (!source) {
+    return res.status(400).json({
+      message: 'Nothing is published on the ' + from + ' channel yet, so there is nothing to send.'
+    });
+  }
+
+  const toBeta = to === 'beta';
+  const tried = [];
+  const found = { apkUrl: '', desktopUrl: '' };
+  let apkCode = null, apkPackage = null;
+
+  // ---- the Android build ----
+  if (source.apkUrl) {
+    for (const candidate of otherChannelUrls(source.apkUrl, toBeta)) {
+      tried.push(candidate);
+      const id = await apkIdentity(candidate);
+      if (!id || !id.packageName) continue;
+      const isBeta = id.packageName.endsWith('.beta');
+      if (isBeta === toBeta) {
+        found.apkUrl = candidate;
+        apkCode = id.versionCode;
+        apkPackage = id.packageName;
+        break;
+      }
+    }
+    if (!found.apkUrl) {
+      return res.status(400).json({
+        message:
+          'Could not find the ' + to.toUpperCase() + ' Android build on that release. ' +
+          'Looked for: ' + tried.join(', ') + '. Attach it to the same GitHub release ' +
+          '(the file built with the ' + to + ' identity), or paste the link by hand above.',
+        tried
+      });
+    }
+  }
+
+  // ---- the Windows build ----
+  if (source.desktopUrl) {
+    for (const candidate of otherChannelUrls(source.desktopUrl, toBeta)) {
+      tried.push(candidate);
+      const probe = await probeInstaller(candidate);
+      if (probe.ok) { found.desktopUrl = candidate; break; }
+    }
+    if (!found.desktopUrl) {
+      return res.status(400).json({
+        message:
+          'Found the Android build but not the ' + to.toUpperCase() + ' Windows installer. ' +
+          'Looked for: ' + tried.filter(t => /\.exe$/i.test(t)).join(', ') + '.',
+        tried
+      });
+    }
+  }
+
+  setVersionFor(to, {
+    versionCode: apkCode || source.versionCode || 0,
+    versionName: source.versionName || '',
+    apkUrl: found.apkUrl,
+    desktopUrl: found.desktopUrl,
+    desktopVersion: source.desktopVersion || '',
+    desktopMandatory: source.desktopMandatory !== false,
+    mandatory: source.mandatory !== false,
+    notes: source.notes || '',
+    channel: to,
+    apkPackage,
+    publishedAt: Date.now()
+  });
+  save();
+
+  const peer = toBeta ? await publishToBetaPeer(versionFor('beta')) : null;
+
+  res.json({
+    ok: true, from, to,
+    appVersion: versionFor(to),
+    found,
+    peer
+  });
 });
 
 app.post('/api/admin/app/version/copy', requireAdmin, async (req, res) => {
