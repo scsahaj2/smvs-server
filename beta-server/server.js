@@ -695,8 +695,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <button class="primary" style="width:100%;margin-top:12px" onclick="doForgot()">Send reset link</button>
       <p style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.5">
         With the recovery code you set a new password right here. Without it,
-        the link is sent to the address that is set as the mail sender in the
-        dashboard (e-mail has to be set up).
+        the link is sent to the admin contact address from the mail section
+        (e-mail has to be set up).
       </p>
       <p style="margin-top:10px"><a href="#" onclick="hideForgot();return false" style="font-size:12px">Back to sign in</a></p>
     </div>
@@ -933,6 +933,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
         <label style="margin-top:10px">Email address the reports come from</label>
         <input id="mailFrom" placeholder="principal@school.org" oninput="suggestMail()">
+        <p id="mailFromHint" class="muted" style="margin:6px 0 0;font-size:12px">
+          Resend free tip: a personal address like <b>you@gmail.com</b> cannot be
+          verified (gmail.com belongs to Google). Until you verify a domain you
+          own, use <b>onboarding@resend.dev</b> here — that one works today.
+        </p>
+        <label style="margin-top:10px">Admin contact address <span class="muted" style="font-weight:400;font-size:11.5px">(password-reset e-mails go here — optional, defaults to the sender)</span></label>
+        <input id="mailAdminTo" placeholder="you@gmail.com">
 
         <div id="mailKeyBox">
           <label style="margin-top:10px">API key</label>
@@ -2200,6 +2207,7 @@ async function loadMail() {
     const m = await api('/api/admin/mail');
     $('mailProvider').value = m.provider || 'brevo';
     $('mailFrom').value = m.from || '';
+    $('mailAdminTo').value = m.adminTo || '';
     $('mailHost').value = m.host || '';
     $('mailPort').value = m.port || 587;
     $('mailSecure').checked = !!m.secure;
@@ -2215,7 +2223,7 @@ async function loadMail() {
 
 async function saveMail() {
   const provider = $('mailProvider').value;
-  const payload = { provider: provider, from: $('mailFrom').value.trim() };
+  const payload = { provider: provider, from: $('mailFrom').value.trim(), adminTo: $('mailAdminTo').value.trim() };
   if (provider === 'smtp') {
     payload.host = $('mailHost').value.trim();
     payload.port = parseInt($('mailPort').value, 10) || 587;
@@ -3459,10 +3467,11 @@ app.post('/api/admin/password/forgot', (req, res) => {
   d.passwordResets = (d.passwordResets || []).filter(r => r.expiresAt > Date.now());
   d.passwordResets.push({ username: admin.username, token, expiresAt: Date.now() + RESET_TOKEN_TTL_MS });
   save();
+  const dest = (mail.adminTo || '').trim() || mail.from;
   const link = req.protocol + '://' + req.get('host') + '/reset-password?u=' +
     encodeURIComponent(admin.username) + '&t=' + token;
   sendMail({
-    to: mail.from,
+    to: dest,
     subject: 'SMVS Browser — password reset link',
     html: '<p>Someone asked to reset the admin password of <b>' + admin.username +
           '</b> on the SMVS Browser dashboard.</p>' +
@@ -3480,7 +3489,7 @@ app.post('/api/admin/password/forgot', (req, res) => {
   }).catch(e => console.log('[reset] e-mail failed:', e.message));
   return res.json({
     ok: true, proof: 'email',
-    message: 'The reset link is on its way to ' + mail.from + ' (the address set as mail sender). Check that inbox — and the spam folder.'
+    message: 'The reset link is on its way to ' + dest + '. Check that inbox — and the spam folder.'
   });
 });
 
@@ -5604,9 +5613,12 @@ async function sendViaResend(cfg, { to, subject, html, text }) {
       'paste it in completely, save, and try again.' };
   }
   if (r.status === 403) {
-    return { ok: false, message: 'Resend: ' + why + ' — on resend.com, add "' + cfg.from +
-      '" as a sender and confirm the code it emails you there, then try again. ' +
-      'Until you verify a domain, Resend only sends to your own address.' };
+    const personal = /@(gmail|googlemail|yahoo|outlook|hotmail|aol|icloud)\.(com|co\.uk)$/i.test(cfg.from);
+    const tip = personal
+      ? 'A personal address like this one can never be verified on Resend (you do not own that domain) — set the sender to onboarding@resend.dev (free, works today) and put your real address in the "Admin contact address" box.'
+      : 'on resend.com, verify that domain (DNS records) or add it as a sender and confirm the code it emails you, then try again.';
+    return { ok: false, message: 'Resend: ' + why + ' — ' + tip +
+      ' Until a domain is verified, Resend only sends to your own address.' };
   }
   return { ok: false, message: 'Resend refused it: ' + why };
 }
@@ -5758,7 +5770,8 @@ app.get('/api/admin/mail', requireAdmin, (_req, res) => {
     port: (m && m.port) || 587,
     secure: !!(m && m.secure),
     user: (m && m.user) || '',
-    from: (m && m.from) || ''
+    from: (m && m.from) || '',
+    adminTo: (m && m.adminTo) || ''
     // the password is never sent back
   });
 });
@@ -5769,9 +5782,13 @@ app.put('/api/admin/mail', requireAdmin, (req, res) => {
   const existing = d.mail || {};
   const provider = ['brevo', 'resend', 'smtp'].includes(b.provider) ? b.provider : 'brevo';
   const from = String(b.from || '').trim();
+  const adminTo = String(b.adminTo || '').trim() || '';
 
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(from)) {
     return res.status(400).json({ message: 'Enter the email address the reports come from.' });
+  }
+  if (adminTo && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adminTo)) {
+    return res.status(400).json({ message: 'The admin contact address is not a valid e-mail address.' });
   }
 
   if (provider === 'brevo' || provider === 'resend') {
@@ -5781,7 +5798,7 @@ app.put('/api/admin/mail', requireAdmin, (req, res) => {
         message: 'Paste the API key from ' + (provider === 'brevo' ? 'Brevo' : 'Resend') + '.'
       });
     }
-    d.mail = { provider, from, apiKey };
+    d.mail = { provider, from, apiKey, adminTo };
     save();
     return res.json({ ok: true, provider });
   }
@@ -5794,7 +5811,7 @@ app.put('/api/admin/mail', requireAdmin, (req, res) => {
 
   d.mail = {
     provider: 'smtp', host, port: Number(b.port) || 587,
-    secure: b.secure === true, user, pass, from
+    secure: b.secure === true, user, pass, from, adminTo
   };
   save();
   res.json({ ok: true, provider: 'smtp' });
