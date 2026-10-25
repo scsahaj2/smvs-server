@@ -2242,7 +2242,9 @@ async function saveMail() {
 }
 
 async function testMail() {
-  const to = prompt('Send a test email to which address?', $('mailFrom').value || '');
+  // The default must be the admin's own address, not the sender: on the free
+  // plans a test mail to any other address is refused (it is not "your own").
+  const to = prompt('Send a test email to which address?\n(Free plan: this must be your own address.)', $('mailAdminTo').value || $('mailFrom').value || '');
   if (!to) return;
   $('mailStatus').textContent = 'Sending…';
   try {
