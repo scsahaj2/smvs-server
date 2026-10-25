@@ -20,6 +20,7 @@ const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 const zlib = require('zlib');
 const dns = require('dns');
 
@@ -91,6 +92,13 @@ const DEFAULT_DB = {
     { url, username, password, lastOk, lastPublishAt, lastError }
   */
   betaPeer: null,
+
+  /*
+    One-time password-reset tokens, issued by POST /api/admin/password/forgot.
+
+    { username, token, expiresAt }
+  */
+  passwordResets: [],
 
   /*
     The address every device should be talking to.
@@ -673,8 +681,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <input id="admPass" type="password" placeholder="admin123" autocomplete="current-password">
     <p id="loginErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
     <button class="primary" style="width:100%;margin-top:14px" onclick="doLogin()">Sign In</button>
+    <p style="margin-top:14px;text-align:center">
+      <a href="#" onclick="showForgot();return false" style="font-size:12.5px">Forgot your password?</a>
+    </p>
+    <div id="forgotView" class="hidden" style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+      <p style="font-size:13.5px;font-weight:700;margin-bottom:10px">Reset your password</p>
+      <label>Username</label>
+      <input id="fgUser" value="admin" autocomplete="username">
+      <label>Recovery code <span style="font-weight:400;color:var(--muted);font-size:11.5px">(the secret saved in the server settings — optional)</span></label>
+      <input id="fgCode" type="password" autocomplete="off" placeholder="leave empty to use e-mail">
+      <p id="fgErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
+      <p id="fgHint" class="hidden" style="color:var(--muted);font-size:12.5px"></p>
+      <button class="primary" style="width:100%;margin-top:12px" onclick="doForgot()">Send reset link</button>
+      <p style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.5">
+        With the recovery code you set a new password right here. Without it,
+        the link is sent to the address that is set as the mail sender in the
+        dashboard (e-mail has to be set up).
+      </p>
+      <p style="margin-top:10px"><a href="#" onclick="hideForgot();return false" style="font-size:12px">Back to sign in</a></p>
+    </div>
+    <div id="resetPassView" class="hidden" style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+      <p style="font-size:13.5px;font-weight:700;margin-bottom:10px">Choose a new password</p>
+      <label>New password</label>
+      <input id="npPass" type="password" autocomplete="new-password">
+      <label>Repeat new password</label>
+      <input id="npPass2" type="password" autocomplete="new-password">
+      <p id="npErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
+      <button class="primary" style="width:100%;margin-top:12px" onclick="doResetPassword()">Set new password</button>
+    </div>
   </div>
 </div>
+
 
 <!-- ============ DASHBOARD ============ -->
 <div id="appView" class="hidden">
@@ -1344,7 +1381,14 @@ async function api(pathname, options = {}) {
       ...(options.headers || {})
     }
   });
-  if (res.status === 401) { logout(); throw new Error('Session expired'); }
+  if (res.status === 401) {
+    if (pathname === '/api/admin/login') {
+      // A failed sign-in is not a lost session — say what is actually wrong.
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.message || 'Invalid credentials.');
+    }
+    logout(); throw new Error('Session expired');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.message || \`Request failed (\${res.status})\`);
   return data;
@@ -1377,6 +1421,69 @@ async function doLogin() {
     err.textContent = e.message;
     err.classList.remove('hidden');
   }
+}
+
+// ---- forgot / reset password (the login screen, no session needed) ----
+
+let resetProof = null;
+
+function showForgot() {
+  $('loginErr').classList.add('hidden');
+  $('fgErr').classList.add('hidden');
+  $('fgHint').classList.add('hidden');
+  $('npErr').classList.add('hidden');
+  $('forgotView').classList.remove('hidden');
+  $('resetPassView').classList.add('hidden');
+  resetProof = null;
+}
+
+function hideForgot() {
+  $('forgotView').classList.add('hidden');
+  $('resetPassView').classList.add('hidden');
+  resetProof = null;
+}
+
+async function doForgot() {
+  const err = $('fgErr'), hint = $('fgHint');
+  err.classList.add('hidden'); hint.classList.add('hidden');
+  try {
+    const r = await fetch(API + '/api/admin/password/forgot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('fgUser').value, code: $('fgCode').value })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { err.textContent = data.message || 'Something went wrong.'; err.classList.remove('hidden'); return; }
+    if (data.proof && data.proof !== 'email') {
+      // The recovery code was accepted — set the new password straight away.
+      resetProof = data.proof;
+      $('forgotView').classList.add('hidden');
+      $('resetPassView').classList.remove('hidden');
+    } else {
+      hint.textContent = data.message || 'If e-mail is set up, the reset link is on its way.';
+      hint.classList.remove('hidden');
+    }
+  } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
+}
+
+async function doResetPassword() {
+  const err = $('npErr');
+  err.classList.add('hidden');
+  const p1 = $('npPass').value, p2 = $('npPass2').value;
+  if (p1.length < 8) { err.textContent = 'Use at least 8 characters.'; err.classList.remove('hidden'); return; }
+  if (p1 !== p2) { err.textContent = 'The two passwords do not match.'; err.classList.remove('hidden'); return; }
+  try {
+    const r = await fetch(API + '/api/admin/password/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('fgUser').value, password: p1, proof: resetProof })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { err.textContent = data.message || 'Something went wrong.'; err.classList.remove('hidden'); return; }
+    alert('Password changed. Sign in with your new password.');
+    hideForgot();
+    $('admPass').value = p1;
+  } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
 }
 
 function logout() {
@@ -3292,6 +3399,124 @@ app.post('/api/admin/login', (req, res) => {
   const token = jwt.sign({ kind: 'admin', sub: admin.id }, JWT_SECRET, { expiresIn: '30d' });
   res.json({ token, username: admin.username });
 });
+
+// ---- password recovery (public — no session needed) ----
+//
+// Two ways out of a forgotten password:
+//   1. a recovery code, stored once as the RESET_CODE environment variable
+//      on the service (works even when e-mail is not set up), and
+//   2. a one-time link e-mailed to the address configured as the mail
+//      sender (needs the mail section of the dashboard to work).
+
+const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
+const forgotAttempts = new Map();
+
+function sameSecret(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function recoveryRateLimited(name) {
+  const now = Date.now();
+  let e = forgotAttempts.get(name);
+  if (!e || now - e.windowStart > 15 * 60 * 1000) {
+    e = { count: 0, windowStart: now };
+    forgotAttempts.set(name, e);
+  }
+  e.count++;
+  return e.count > 5;
+}
+
+app.post('/api/admin/password/forgot', (req, res) => {
+  const d = db();
+  const username = String((req.body || {}).username || '').trim();
+  const code = String((req.body || {}).code || '').trim();
+  const admin = d.admins.find(a => a.username.toLowerCase() === username.toLowerCase());
+  if (!admin) return res.status(404).json({ message: 'No admin with that username.' });
+  if (recoveryRateLimited(username.toLowerCase() + ':forgot')) {
+    return res.status(429).json({ message: 'Too many attempts — try again in 15 minutes.' });
+  }
+
+  const envCode = (process.env.RESET_CODE || '').trim();
+
+  // ---- path 1: recovery code, straight to the new-password step ----
+  if (code) {
+    if (envCode && sameSecret(code, envCode)) {
+      return res.json({ ok: true, proof: code });
+    }
+    return res.status(400).json({ message: 'That recovery code is not correct.' });
+  }
+
+  // ---- path 2: one-time link by e-mail ----
+  const mail = d.mail;
+  if (!mail || !mail.from) {
+    return res.status(400).json({
+      message: 'No recovery code was given and e-mail is not set up yet. Enter the recovery code (set once in the server settings), or set up the mail section of the dashboard first.'
+    });
+  }
+  const token = crypto.randomBytes(24).toString('hex');
+  d.passwordResets = (d.passwordResets || []).filter(r => r.expiresAt > Date.now());
+  d.passwordResets.push({ username: admin.username, token, expiresAt: Date.now() + RESET_TOKEN_TTL_MS });
+  save();
+  const link = req.protocol + '://' + req.get('host') + '/reset-password?u=' +
+    encodeURIComponent(admin.username) + '&t=' + token;
+  sendMail({
+    to: mail.from,
+    subject: 'SMVS Browser — password reset link',
+    html: '<p>Someone asked to reset the admin password of <b>' + admin.username +
+          '</b> on the SMVS Browser dashboard.</p>' +
+          '<p><a href="' + link + '">Click here to set a new password</a><br>' +
+          'The link works once and expires after 30 minutes.</p>' +
+          '<p>If you did not ask for this, simply ignore this e-mail.</p>',
+    text: 'Password reset link (works once, expires in 30 minutes):\n' + link
+  }).then(r => {
+    if (!r.ok) {
+      const dd = db();
+      dd.passwordResets = (dd.passwordResets || []).filter(x => x.token !== token);
+      save();
+      console.log('[reset] e-mail failed:', r.message);
+    }
+  }).catch(e => console.log('[reset] e-mail failed:', e.message));
+  return res.json({
+    ok: true, proof: 'email',
+    message: 'The reset link is on its way to ' + mail.from + ' (the address set as mail sender). Check that inbox — and the spam folder.'
+  });
+});
+
+app.post('/api/admin/password/reset', (req, res) => {
+  const b = req.body || {};
+  const d = db();
+  const username = String(b.username || '').trim();
+  const password = String(b.password || '');
+  const proof = String(b.proof || '');
+  const admin = d.admins.find(a => a.username.toLowerCase() === username.toLowerCase());
+  if (!admin) return res.status(404).json({ message: 'No admin with that username.' });
+  if (recoveryRateLimited(username.toLowerCase() + ':reset')) {
+    return res.status(429).json({ message: 'Too many attempts — try again in 15 minutes.' });
+  }
+  if (password.length < 8) return res.status(400).json({ message: 'The new password needs at least 8 characters.' });
+  if (!proof) return res.status(400).json({ message: 'This reset is no longer valid. Ask for a new one.' });
+
+  const envCode = (process.env.RESET_CODE || '').trim();
+  let valid = envCode && sameSecret(proof, envCode);
+  if (!valid) {
+    const now = Date.now();
+    d.passwordResets = (d.passwordResets || []).filter(r => r.expiresAt > now);
+    const found = d.passwordResets.find(r => r.username === admin.username && sameSecret(r.token, proof));
+    if (found) valid = true;
+  }
+  if (!valid) {
+    return res.status(400).json({ message: 'This reset link is not valid — it may be expired or already used. Ask for a new one.' });
+  }
+
+  admin.passwordHash = bcrypt.hashSync(password, 10);
+  d.passwordResets = (d.passwordResets || []).filter(r => r.username !== admin.username);
+  save();
+  return res.json({ ok: true, message: 'Password changed.' });
+});
+
+
 
 app.get('/api/admin/categories', requireAdmin, (_req, res) => {
   res.json({ categories: CATEGORIES });
@@ -5962,6 +6187,64 @@ app.get('/api/storage', (_req, res) => {
 app.get('/', (_req, res) => {
   res.type('html').send(DASHBOARD_HTML);
 });
+
+// The page a password-reset e-mail points at — public, one form, no session.
+const RESET_PASSWORD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set a new password — SMVS Browser</title>
+</head>
+<body style="margin:0;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;background:#F4F6FA;display:flex;justify-content:center;padding-top:9vh">
+<div style="background:#fff;border-radius:14px;padding:28px;max-width:380px;width:calc(100% - 40px);box-shadow:0 4px 18px rgba(20,35,60,.08)">
+  <h2 style="margin:0 0 6px;color:#1D4E79;font-size:20px">SMVS Browser</h2>
+  <p id="lead" style="color:#5A6B7F;font-size:13px;margin:0 0 18px">Set a new password for the admin account.</p>
+  <label style="font-size:12.5px;font-weight:600;display:block;margin-bottom:4px">New password</label>
+  <input id="np1" type="password" autocomplete="new-password" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #D7DEE8;border-radius:8px;font-size:14px;margin-bottom:12px">
+  <label style="font-size:12.5px;font-weight:600;display:block;margin-bottom:4px">Repeat new password</label>
+  <input id="np2" type="password" autocomplete="new-password" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #D7DEE8;border-radius:8px;font-size:14px;margin-bottom:6px">
+  <p id="msg" style="color:#B3261E;font-size:13px;min-height:18px;margin:8px 0"></p>
+  <button id="go" onclick="doIt()" style="width:100%;padding:11px;background:#1D4E79;color:#fff;border:0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Set new password</button>
+  <p style="font-size:11.5px;color:#8595A6;margin-top:14px">This link works once and expires after 30 minutes. After the change, sign in with the new password and close this tab.</p>
+</div>
+<script>
+const q = new URLSearchParams(location.search);
+const PROOF = q.get('t') || '';
+const USER = q.get('u') || '';
+if (!PROOF) {
+  document.getElementById('lead').textContent = 'This link is incomplete — ask for a new reset link.';
+  document.getElementById('go').disabled = true;
+}
+async function doIt() {
+  const msg = document.getElementById('msg'), btn = document.getElementById('go');
+  msg.style.color = '#B3261E'; msg.textContent = '';
+  const p1 = document.getElementById('np1').value, p2 = document.getElementById('np2').value;
+  if (p1.length < 8) { msg.textContent = 'Use at least 8 characters.'; return; }
+  if (p1 !== p2) { msg.textContent = 'The two passwords do not match.'; return; }
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/admin/password/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: USER, password: p1, proof: PROOF })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { msg.textContent = d.message || 'Something went wrong.'; btn.disabled = false; return; }
+    msg.style.color = '#1B7F4B';
+    msg.textContent = 'Password changed. You can sign in now.';
+  } catch (e) { msg.textContent = 'Network problem — try again.'; btn.disabled = false; }
+}
+</script>
+</body>
+</html>`;
+
+app.get('/reset-password', (_req, res) => {
+  res.type('html').send(RESET_PASSWORD_HTML);
+});
+
+
+
 
 /**
  * Boot order matters: the data must be in memory before anything is seeded or
