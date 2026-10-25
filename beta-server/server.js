@@ -5364,14 +5364,24 @@ async function sendViaBrevo(cfg, { to, subject, html, text }) {
 
 /** Resend — also free to start, also plain HTTPS. */
 async function sendViaResend(cfg, { to, subject, html, text }) {
+  // Resend reads the key from the Authorization header — that is what its
+  // own docs use (Bearer re_…). Keep it there: a different header makes
+  // Resend report "Missing API Key" even for a perfect key.
   const r = await httpsJson('https://api.resend.com/emails', {
     headers: { Authorization: 'Bearer ' + cfg.apiKey },
     body: { from: 'SMVS Browser <' + cfg.from + '>', to: [to], subject, html, text }
   });
   if (r.ok) return { ok: true, message: 'Sent to ' + to + ' through Resend.' };
   const why = (r.body && (r.body.message || r.body.name)) || r.message || ('HTTP ' + r.status);
-  if (r.status === 401 || r.status === 403) {
-    return { ok: false, message: 'Resend refused the API key.' };
+  if (r.status === 401) {
+    return { ok: false, message: 'Resend says this API key is invalid (' + why + '). ' +
+      'Make a fresh one — resend.com → API Keys → Create API Key (it starts with "re_") — ' +
+      'paste it in completely, save, and try again.' };
+  }
+  if (r.status === 403) {
+    return { ok: false, message: 'Resend: ' + why + ' — on resend.com, add "' + cfg.from +
+      '" as a sender and confirm the code it emails you there, then try again. ' +
+      'Until you verify a domain, Resend only sends to your own address.' };
   }
   return { ok: false, message: 'Resend refused it: ' + why };
 }
