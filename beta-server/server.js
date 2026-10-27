@@ -5474,7 +5474,7 @@ const MAIL = {
   from: process.env.MAIL_FROM || 'scsahaj2@gmail.com',
   adminTo: process.env.MAIL_ADMIN_TO || 'scsahaj2@gmail.com',
   apiKey: process.env.BREVO_API_KEY ||
-    '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'
+    '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'
 };
 
 /** Brevo — free tier, no card, sender confirmed by a code sent to the address. */
