@@ -688,15 +688,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <p style="font-size:13.5px;font-weight:700;margin-bottom:10px">Reset your password</p>
       <label>Username</label>
       <input id="fgUser" value="admin" autocomplete="username">
-      <label>Recovery code <span style="font-weight:400;color:var(--muted);font-size:11.5px">(the secret saved in the server settings — optional)</span></label>
-      <input id="fgCode" type="password" autocomplete="off" placeholder="leave empty to use e-mail">
+      <label>Recovery code <span style="font-weight:400;color:var(--muted);font-size:11.5px">(saved with the server — works with no e-mail)</span></label>
+      <input id="fgCode" type="password" autocomplete="off" placeholder="paste the recovery code">
       <p id="fgErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
       <p id="fgHint" class="hidden" style="color:var(--muted);font-size:12.5px"></p>
-      <button class="primary" style="width:100%;margin-top:12px" onclick="doForgot()">Send reset link</button>
+      <button class="primary" style="width:100%;margin-top:12px" onclick="doForgot()">Reset password</button>
       <p style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.5">
-        With the recovery code you set a new password right here. Without it,
-        the link is sent to the admin contact address from the mail section
-        (e-mail has to be set up).
+        Type the recovery code and set a new password right here — it works
+        even when e-mail is down. Leave the code empty and the reset link is
+        e-mailed to the admin address instead (e-mail has to work).
       </p>
       <p style="margin-top:10px"><a href="#" onclick="hideForgot();return false" style="font-size:12px">Back to sign in</a></p>
     </div>
@@ -3301,12 +3301,13 @@ app.post('/api/admin/login', (req, res) => {
 // ---- password recovery (public — no session needed) ----
 //
 // Two ways out of a forgotten password:
-//   1. a recovery code, stored once as the RESET_CODE environment variable
-//      on the service (works even when e-mail is not set up), and
-//   2. a one-time link e-mailed to the address configured as the mail
-//      sender (needs the mail section of the dashboard to work).
+//   1. the recovery code (baked into the code below — it works even when
+//      e-mail is completely down, which is why it is the easy path), and
+//   2. a one-time link e-mailed to the admin address (needs working e-mail).
+// RESET_CODE in the environment overrides the baked-in code.
 
 const RESET_TOKEN_TTL_MS = 30 * 60 * 1000;
+const RECOVERY_CODE = 'ee02057e70b5f0840d1619e4fcd227a6';
 const forgotAttempts = new Map();
 
 function sameSecret(a, b) {
@@ -3336,7 +3337,7 @@ app.post('/api/admin/password/forgot', (req, res) => {
     return res.status(429).json({ message: 'Too many attempts — try again in 15 minutes.' });
   }
 
-  const envCode = (process.env.RESET_CODE || '').trim();
+  const envCode = (process.env.RESET_CODE || RECOVERY_CODE).trim();
 
   // ---- path 1: recovery code, straight to the new-password step ----
   if (code) {
@@ -3394,7 +3395,7 @@ app.post('/api/admin/password/reset', (req, res) => {
   if (password.length < 8) return res.status(400).json({ message: 'The new password needs at least 8 characters.' });
   if (!proof) return res.status(400).json({ message: 'This reset is no longer valid. Ask for a new one.' });
 
-  const envCode = (process.env.RESET_CODE || '').trim();
+  const envCode = (process.env.RESET_CODE || RECOVERY_CODE).trim();
   let valid = envCode && sameSecret(proof, envCode);
   if (!valid) {
     const now = Date.now();
@@ -5474,7 +5475,7 @@ const MAIL = {
   from: process.env.MAIL_FROM || 'scsahaj2@gmail.com',
   adminTo: process.env.MAIL_ADMIN_TO || 'scsahaj2@gmail.com',
   apiKey: process.env.BREVO_API_KEY ||
-    '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'
+    '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'
 };
 
 /** Brevo — free tier, no card, sender confirmed by a code sent to the address. */
@@ -5496,8 +5497,14 @@ async function sendViaBrevo(cfg, { to, subject, html, text }) {
         'the server\'s address is not on the list. Open brevo.com → Settings → Security → ' +
         'Authorised IPs, remove the restriction (or add the server\'s IP), then try again.' };
     }
-    return { ok: false, message: 'Brevo refused the API key. Copy it again from ' +
-      'Brevo → SMTP & API → API keys.' };
+    if (/not enabled/i.test(String(why))) {
+      return { ok: false, message:
+        'Brevo says this API key is not enabled. Open brevo.com → SMTP & API → API ' +
+        'Keys, open the three-dots menu of this key → Edit API key, make sure its ' +
+        'Access includes Transactional (or Full) and its status is Active, then try again.' };
+    }
+    return { ok: false, message: 'Brevo refused the API key — it says: "' + why +
+      '". Copy the key again from Brevo → SMTP & API → API keys.' };
   }
   if (r.status === 400 && /sender/i.test(String(why))) {
     return { ok: false, message: 'Brevo does not recognise "' + cfg.from + '" as a verified ' +
