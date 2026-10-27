@@ -916,59 +916,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </p>
 
       <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
-        <b>&#9993; How the reports are emailed</b>
+        <b>&#9993; E-mail</b>
         <p class="muted" style="margin:6px 0 10px">
-          <b>Render's free plan blocks SMTP</b> (ports 25, 465 and 587), so Gmail
-          and the like cannot work from there — that is what
-          "Could not reach the mail server" means. <b>Brevo</b> sends over
-          ordinary HTTPS instead: free, no card, and set up in two minutes.
+          Nothing to set up here — the server sends the e-mails on its own.
+          <span id="mailStatus"></span>
         </p>
+        <button class="secondary" style="font-size:13px" onclick="testMail()">Send a test email</button>
+      </div>
 
-        <label>How to send</label>
-        <select id="mailProvider" onchange="paintMailProvider()">
-          <option value="brevo">Brevo &mdash; free, works on Render (recommended)</option>
-          <option value="resend">Resend &mdash; free, works on Render</option>
-          <option value="smtp">SMTP / Gmail &mdash; only on a paid host</option>
-        </select>
-
-        <label style="margin-top:10px">Email address the reports come from</label>
-        <input id="mailFrom" placeholder="principal@school.org" oninput="suggestMail()">
-        <p id="mailFromHint" class="muted" style="margin:6px 0 0;font-size:12px">
-          Resend free tip: a personal address like <b>you@gmail.com</b> cannot be
-          verified (gmail.com belongs to Google). Until you verify a domain you
-          own, use <b>onboarding@resend.dev</b> here — that one works today.
+      <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
+        <b>Send a report now</b>
+        <p class="muted" style="margin:6px 0 10px">
+          Pick the period and, if you want, only some devices — type any
+          e-mail address and the report goes out at once, without waiting
+          for a schedule.
         </p>
-        <label style="margin-top:10px">Admin contact address <span class="muted" style="font-weight:400;font-size:11.5px">(password-reset e-mails go here — optional, defaults to the sender)</span></label>
-        <input id="mailAdminTo" placeholder="you@gmail.com">
-
-        <div id="mailKeyBox">
-          <label style="margin-top:10px">API key</label>
-          <input id="mailKey" type="password" placeholder="leave blank to keep the saved one">
-          <p id="mailKeyHelp" class="muted" style="margin:8px 0 0"></p>
+        <div class="row">
+          <div><label>Send to</label><input id="nowEmail" placeholder="scsahaj2@gmail.com"></div>
+          <div><label>Period (days)</label><input id="nowDays" value="7"></div>
         </div>
-
-        <div id="mailSmtpBox" class="hidden">
-          <p id="mailAuto" class="muted" style="margin:8px 0 0">
-            Type the address and the server settings fill themselves in.
-          </p>
-          <div class="row" style="margin-top:8px">
-            <div><label>SMTP host</label><input id="mailHost" placeholder="filled in automatically"></div>
-            <div><label>Port</label><input id="mailPort" placeholder="587"></div>
-          </div>
-          <label style="margin-top:10px">Password / App Password</label>
-          <input id="mailPass" type="password" placeholder="leave blank to keep the saved one">
-          <label style="display:flex;align-items:center;gap:8px;margin-top:10px">
-            <input type="checkbox" id="mailSecure" style="width:auto">
-            <span style="color:var(--text);font-size:14px">Use SSL (port 465)</span>
-          </label>
-          <input id="mailUser" type="hidden">
-        </div>
-
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
-          <button class="primary" style="font-size:13px" onclick="saveMail()">Save</button>
-          <button class="secondary" style="font-size:13px" onclick="testMail()">Send a test email</button>
-        </div>
-        <p id="mailStatus" class="muted" style="margin-top:10px">Not set up yet.</p>
+        <label>Devices (optional — blank means every device)</label>
+        <input id="nowDevices" placeholder="Lab PC 3, Library PC 1">
+        <p id="nowErr" class="hidden" style="color:var(--danger);font-size:13px"></p>
+        <button class="primary" style="margin-top:12px;font-size:13px" onclick="sendNow()">Send report now</button>
       </div>
 
       <div style="background:var(--bg);border-radius:10px;padding:14px;margin-bottom:14px">
@@ -2180,132 +2150,50 @@ async function publishTo(channel) {
 
 /* ------------------------------------------------ the email account ---- */
 
-const MAIL_HELP = {
-  brevo:
-    '1. Open <b>brevo.com</b> and sign up (free, no card). ' +
-    '2. <b>Senders &amp; IP</b> &rarr; add the address above &rarr; type the code it emails you. ' +
-    '3. <b>SMTP &amp; API</b> &rarr; <b>API keys</b> &rarr; Generate a new API key &rarr; paste it here.',
-  resend:
-    '1. Open <b>resend.com</b> and sign up (free). ' +
-    '2. <b>API Keys</b> &rarr; Create API Key &rarr; paste it here. ' +
-    '3. Until you verify a domain, Resend only lets you send to your own address.',
-  smtp:
-    'Only choose this if your server is on a paid plan. On the free Render plan ' +
-    'the SMTP ports are blocked and this will always time out.'
-};
-
-function paintMailProvider() {
-  const p = $('mailProvider').value;
-  $('mailKeyBox').classList.toggle('hidden', p === 'smtp');
-  $('mailSmtpBox').classList.toggle('hidden', p !== 'smtp');
-  $('mailKeyHelp').innerHTML = MAIL_HELP[p] || '';
-  if (p === 'smtp') doSuggestMail();
-}
+// E-mail is configured in the server code (the provider, the sending
+// address and the API key) — the dashboard has no e-mail settings to show.
+// loadMail() only reports the status and pre-fills the default recipient;
+// the admin's whole job is to press a button.
 
 async function loadMail() {
   try {
     const m = await api('/api/admin/mail');
-    $('mailProvider').value = m.provider || 'brevo';
-    $('mailFrom').value = m.from || '';
-    $('mailAdminTo').value = m.adminTo || '';
-    $('mailHost').value = m.host || '';
-    $('mailPort').value = m.port || 587;
-    $('mailSecure').checked = !!m.secure;
-    $('mailKey').placeholder = m.hasKey
-      ? 'a key is saved — leave blank to keep it'
-      : 'paste the API key here';
-    paintMailProvider();
-    $('mailStatus').textContent = m.configured
-      ? 'Ready — sending as ' + (m.from || '') + ' through ' + (m.provider || 'brevo')
-      : 'Not set up yet.';
+    $('mailStatus').innerHTML = ' &nbsp;Reports go out through <b>' + esc(m.provider) +
+      '</b> from <b>' + esc(m.from) + '</b>.';
+    const def = m.adminTo || m.from || '';
+    if ($('nowEmail') && !$('nowEmail').value) $('nowEmail').value = def;
+    if ($('repEmail') && !$('repEmail').value) $('repEmail').value = def;
   } catch (e) { /* non-fatal */ }
 }
 
-async function saveMail() {
-  const provider = $('mailProvider').value;
-  const payload = { provider: provider, from: $('mailFrom').value.trim(), adminTo: $('mailAdminTo').value.trim() };
-  if (provider === 'smtp') {
-    payload.host = $('mailHost').value.trim();
-    payload.port = parseInt($('mailPort').value, 10) || 587;
-    payload.user = $('mailFrom').value.trim();
-    payload.pass = $('mailPass').value;
-    payload.secure = $('mailSecure').checked;
-  } else {
-    payload.apiKey = $('mailKey').value.trim();
-  }
-  try {
-    await api('/api/admin/mail', { method: 'PUT', body: JSON.stringify(payload) });
-    $('mailPass').value = ''; $('mailKey').value = '';
-    toast('Email settings saved');
-    await loadMail();
-  } catch (e) { alert(e.message); }
-}
-
 async function testMail() {
-  // The default must be the admin's own address, not the sender: on the free
-  // plans a test mail to any other address is refused (it is not "your own").
-  const to = prompt('Send a test email to which address? (Free plan: this must be your own address.)', $('mailAdminTo').value || $('mailFrom').value || '');
-  if (!to) return;
-  $('mailStatus').textContent = 'Sending…';
+  const to = $('nowEmail') ? $('nowEmail').value.trim() : '';
+  $('mailStatus').innerHTML = ' &nbsp;Sending…';
   try {
-    const r = await api('/api/admin/mail/test', { method: 'POST', body: JSON.stringify({ to: to }) });
-    $('mailStatus').textContent = r.message;
+    const r = await api('/api/admin/mail/test', {
+      method: 'POST',
+      body: JSON.stringify({ to: to })
+    });
+    $('mailStatus').innerHTML = ' <span style="color:var(--ok)">&#10003; ' + esc(r.message) + '</span>';
   } catch (e) {
-    $('mailStatus').innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + '</span>';
+    $('mailStatus').innerHTML = ' <span style="color:var(--danger)">' + esc(e.message) + '</span>';
   }
 }
 
-/* ---- SMTP host worked out from the address (only used by the SMTP option) ---- */
-
-var mailSuggestTimer = null;
-
-function setServerFieldsLocked(locked) {
-  for (const id of ['mailHost', 'mailPort']) {
-    const el = $(id);
-    if (!el) continue;
-    el.readOnly = locked;
-    el.style.background = locked ? 'var(--bg)' : '';
-  }
-  if ($('mailSecure')) $('mailSecure').disabled = locked;
-}
-
-function suggestMail() {
-  clearTimeout(mailSuggestTimer);
-  mailSuggestTimer = setTimeout(doSuggestMail, 450);
-}
-
-async function doSuggestMail() {
-  if ($('mailProvider') && $('mailProvider').value !== 'smtp') return;
-  const email = $('mailFrom').value.trim();
-  if (email.indexOf('@') < 1) {
-    $('mailAuto').textContent = 'Type the address and the server settings fill themselves in.';
-    setServerFieldsLocked(false);
-    return;
-  }
-  $('mailAuto').textContent = 'Looking up ' + email.split('@')[1] + '…';
+async function sendNow() {
+  const err = $('nowErr');
+  err.classList.add('hidden');
   try {
-    const r = await api('/api/admin/mail/suggest?email=' + encodeURIComponent(email));
-    if (r.known) {
-      $('mailHost').value = r.host;
-      $('mailPort').value = r.port;
-      $('mailSecure').checked = !!r.secure;
-      setServerFieldsLocked(true);
-      $('mailAuto').innerHTML = '&#10003; ' + esc(r.label) + ' recognised — settings filled in' +
-        (r.note ? '. <b>' + esc(r.note) + '</b>' : '.');
-    } else {
-      if (r.guessHost && !$('mailHost').value) {
-        $('mailHost').value = r.guessHost;
-        $('mailPort').value = r.guessPort || 587;
-      }
-      setServerFieldsLocked(false);
-      $('mailAuto').textContent = (r.reason || 'Provider not recognised.') +
-        ' Please enter the SMTP host and port yourself' +
-        (r.mx && r.mx.length ? ' (its mail servers: ' + r.mx.join(', ') + ').' : '.');
-    }
-  } catch (e) {
-    setServerFieldsLocked(false);
-    $('mailAuto').textContent = 'Could not look that up — enter the host and port yourself.';
-  }
+    const r = await api('/api/admin/reports/send', {
+      method: 'POST',
+      body: JSON.stringify({
+        to: $('nowEmail').value.trim(),
+        days: parseInt($('nowDays').value, 10) || 7,
+        devices: $('nowDevices').value.split(',').map(function (v) { return v.trim(); }).filter(Boolean)
+      })
+    });
+    toast(r.message + ' (' + r.rows + ' visits)');
+  } catch (e) { err.textContent = e.message; err.classList.remove('hidden'); }
 }
 
 /* ------------------------------------------------ report schedules ----- */
@@ -3459,17 +3347,14 @@ app.post('/api/admin/password/forgot', (req, res) => {
   }
 
   // ---- path 2: one-time link by e-mail ----
-  const mail = d.mail;
-  if (!mail || !mail.from) {
-    return res.status(400).json({
-      message: 'No recovery code was given and e-mail is not set up yet. Enter the recovery code (set once in the server settings), or set up the mail section of the dashboard first.'
-    });
-  }
+  // E-mail is fixed in the code (MAIL), so there is always an address the
+  // reset link can go to — no dashboard setup is needed any more.
+  const saved = d.mail || {};
   const token = crypto.randomBytes(24).toString('hex');
   d.passwordResets = (d.passwordResets || []).filter(r => r.expiresAt > Date.now());
   d.passwordResets.push({ username: admin.username, token, expiresAt: Date.now() + RESET_TOKEN_TTL_MS });
   save();
-  const dest = (mail.adminTo || '').trim() || mail.from;
+  const dest = (saved.adminTo || saved.from || MAIL.adminTo || MAIL.from).trim();
   const link = req.protocol + '://' + req.get('host') + '/reset-password?u=' +
     encodeURIComponent(admin.username) + '&t=' + token;
   sendMail({
@@ -5575,6 +5460,23 @@ function httpsJson(url, { method = 'POST', headers = {}, body = null, timeoutMs 
   });
 }
 
+/*
+  ------------------------------------------------- e-mail, fixed in code
+
+  The admin should never have to look at a provider, an address or an API
+  key again. The old dashboard box of e-mail fields is gone; the whole
+  setup now lives here, so "Send a test email" and the scheduled reports
+  simply work. Each value can be overridden by an environment variable, so
+  the key can be rotated in Render without another code change.
+*/
+const MAIL = {
+  provider: process.env.MAIL_PROVIDER || 'brevo',
+  from: process.env.MAIL_FROM || 'scsahaj2@gmail.com',
+  adminTo: process.env.MAIL_ADMIN_TO || 'scsahaj2@gmail.com',
+  apiKey: process.env.BREVO_API_KEY ||
+    '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'
+};
+
 /** Brevo — free tier, no card, sender confirmed by a code sent to the address. */
 async function sendViaBrevo(cfg, { to, subject, html, text }) {
   const r = await httpsJson('https://api.brevo.com/v3/smtp/email', {
@@ -5588,6 +5490,12 @@ async function sendViaBrevo(cfg, { to, subject, html, text }) {
   if (r.ok) return { ok: true, message: 'Sent to ' + to + ' through Brevo.' };
   const why = (r.body && (r.body.message || r.body.code)) || r.message || ('HTTP ' + r.status);
   if (r.status === 401) {
+    if (/unrecognised ip|authorised ips|authorised_ips/i.test(String(why))) {
+      return { ok: false, message:
+        'Brevo is blocking this server: the account has "Authorised IPs" turned on and ' +
+        'the server\'s address is not on the list. Open brevo.com → Settings → Security → ' +
+        'Authorised IPs, remove the restriction (or add the server\'s IP), then try again.' };
+    }
     return { ok: false, message: 'Brevo refused the API key. Copy it again from ' +
       'Brevo → SMTP & API → API keys.' };
   }
@@ -5626,17 +5534,27 @@ async function sendViaResend(cfg, { to, subject, html, text }) {
 }
 
 async function sendMail({ to, subject, html, text }) {
-  const cfg = db().mail;
-  if (!cfg) return { ok: false, message: 'Email is not set up yet.' };
+  const saved = db().mail || {};
+  // The provider, the sending address and the API key are fixed in the code
+  // (MAIL, above) — there is no dashboard field for them any more. A saved
+  // from/admin address is honoured if one exists; the key itself is never
+  // read from the database.
+  const cfg = {
+    provider: MAIL.provider,
+    from: (saved.from || MAIL.from).trim(),
+    adminTo: (saved.adminTo || MAIL.adminTo).trim(),
+    apiKey: MAIL.apiKey
+  };
 
   try {
     if (cfg.provider === 'brevo')  return await sendViaBrevo(cfg,  { to, subject, html, text });
     if (cfg.provider === 'resend') return await sendViaResend(cfg, { to, subject, html, text });
 
-    if (!cfg.host || !cfg.user) {
+    // Only reachable if MAIL_PROVIDER is pointed at smtp via an env var.
+    if (!saved.host || !saved.user) {
       return { ok: false, message: 'Email is not set up yet — choose how to send first.' };
     }
-    const r = await smtpSend(cfg, { to, subject, html, text });
+    const r = await smtpSend(saved, { to, subject, html, text });
 
     /*
       Turn the one failure people actually hit into an answer instead of a
@@ -5646,9 +5564,7 @@ async function sendMail({ to, subject, html, text }) {
     if (!r.ok && /ETIMEDOUT|timed out|did not answer/i.test(r.message || '')) {
       return { ok: false, message:
         'Could not reach the mail server. Free Render services block SMTP ports ' +
-        '(25, 465 and 587) at the firewall, so no SMTP settings can work there. ' +
-        'Switch "How to send" to Brevo or Resend — those send over ordinary HTTPS, ' +
-        'are free, and need no card.' };
+        '(25, 465 and 587) at the firewall, so no SMTP settings can work there.' };
     }
     return r;
   } catch (e) {
@@ -5762,61 +5678,22 @@ app.get('/api/admin/mail/suggest', requireAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/mail', requireAdmin, (_req, res) => {
-  const m = db().mail;
-  const ready = !!(m && (m.provider === 'smtp' ? (m.host && m.user) : m.apiKey));
+  const saved = db().mail || {};
+  // E-mail is configured in the code (MAIL) — there is nothing to fill in,
+  // so the dashboard only needs the status and the default recipient.
   res.json({
-    provider: (m && m.provider) || 'brevo',
-    hasKey: !!(m && m.apiKey),
-    configured: ready,
-    host: (m && m.host) || '',
-    port: (m && m.port) || 587,
-    secure: !!(m && m.secure),
-    user: (m && m.user) || '',
-    from: (m && m.from) || '',
-    adminTo: (m && m.adminTo) || ''
-    // the password is never sent back
+    configured: true,
+    provider: MAIL.provider,
+    from: saved.from || MAIL.from,
+    adminTo: saved.adminTo || MAIL.adminTo
   });
 });
 
-app.put('/api/admin/mail', requireAdmin, (req, res) => {
-  const b = req.body || {};
-  const d = db();
-  const existing = d.mail || {};
-  const provider = ['brevo', 'resend', 'smtp'].includes(b.provider) ? b.provider : 'brevo';
-  const from = String(b.from || '').trim();
-  const adminTo = String(b.adminTo || '').trim() || '';
-
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(from)) {
-    return res.status(400).json({ message: 'Enter the email address the reports come from.' });
-  }
-  if (adminTo && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adminTo)) {
-    return res.status(400).json({ message: 'The admin contact address is not a valid e-mail address.' });
-  }
-
-  if (provider === 'brevo' || provider === 'resend') {
-    const apiKey = String(b.apiKey || '').trim() || existing.apiKey || '';
-    if (!apiKey) {
-      return res.status(400).json({
-        message: 'Paste the API key from ' + (provider === 'brevo' ? 'Brevo' : 'Resend') + '.'
-      });
-    }
-    d.mail = { provider, from, apiKey, adminTo };
-    save();
-    return res.json({ ok: true, provider });
-  }
-
-  const host = String(b.host || '').trim();
-  const user = String(b.user || '').trim() || from;
-  const pass = String(b.pass || '') || existing.pass || '';
-  if (!host) return res.status(400).json({ message: 'Enter the SMTP host.' });
-  if (!pass) return res.status(400).json({ message: 'Enter the password (for Gmail, an App Password).' });
-
-  d.mail = {
-    provider: 'smtp', host, port: Number(b.port) || 587,
-    secure: b.secure === true, user, pass, from, adminTo
-  };
-  save();
-  res.json({ ok: true, provider: 'smtp' });
+app.put('/api/admin/mail', requireAdmin, (_req, res) => {
+  // E-mail is configured in the code (MAIL), not in the dashboard — there is
+  // nothing left to save here. Kept as a no-op so an old cached dashboard
+  // cannot error out if it still posts to this address.
+  res.json({ ok: true, provider: MAIL.provider });
 });
 
 app.delete('/api/admin/mail', requireAdmin, (_req, res) => {
@@ -5825,7 +5702,10 @@ app.delete('/api/admin/mail', requireAdmin, (_req, res) => {
 });
 
 app.post('/api/admin/mail/test', requireAdmin, async (req, res) => {
-  const to = String((req.body || {}).to || '').trim();
+  const b = req.body || {};
+  // One click: the test goes to the admin's own address unless a specific
+  // one is supplied.
+  const to = String(b.to || '').trim() || (db().mail && db().mail.adminTo) || MAIL.adminTo;
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
     return res.status(400).json({ message: 'Enter the address to send the test to.' });
   }
@@ -5864,7 +5744,7 @@ app.get('/api/admin/reports', requireAdmin, (_req, res) => {
     reports: d.reports || [],
     knownDevices: devices,
     historyRows: (d.history || []).length,
-    mailConfigured: !!(d.mail && d.mail.host && d.mail.user)
+    mailConfigured: true // e-mail is fixed in the code (MAIL)
   });
 });
 
@@ -5945,6 +5825,40 @@ app.get('/api/admin/reports/:id/preview', requireAdmin, (req, res) => {
   res.type('html').send(buildReport(row, rows, from, to).html);
 });
 
+/**
+  One-off report: any period, any devices, any recipient — without touching a
+  schedule. This is the "admin sends a report by hand" path.
+*/
+app.post('/api/admin/reports/send', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const to = String(b.to || '').trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+    return res.status(400).json({ message: 'Enter a valid e-mail address to send the report to.' });
+  }
+  const devices = Array.isArray(b.devices)
+    ? b.devices.map(v => String(v).trim()).filter(Boolean)
+    : (typeof b.devices === 'string'
+        ? b.devices.split(',').map(v => v.trim()).filter(Boolean) : []);
+  const now = Date.now();
+  let from = now - 7 * 86400000;
+  let toMs = now;
+  if (b.days != null && b.days !== '') {
+    const days = Math.max(1, Math.min(365, parseInt(b.days, 10) || 7));
+    from = now - days * 86400000;
+  }
+  // `from` / `until` set the period; `to` is reserved for the e-mail address.
+  if (b.from) { const t = new Date(b.from).getTime(); if (isFinite(t)) from = t; }
+  if (b.until) { const t = new Date(b.until).getTime(); if (isFinite(t)) toMs = t; }
+  if (!isFinite(from) || !isFinite(toMs) || from > toMs) {
+    return res.status(400).json({ message: 'Enter a valid period.' });
+  }
+  const rows = historyFor({ devices }, from).filter(h => h.at <= toMs);
+  const mail = buildReport({ devices }, rows, from, toMs);
+  const r = await sendMail({ to, ...mail });
+  if (!r.ok) return res.status(400).json({ message: r.message });
+  res.json({ ok: true, rows: rows.length, message: 'Report sent to ' + to + '.' });
+});
+
 /*
   The clock.
 
@@ -5959,7 +5873,7 @@ async function reportTick() {
   try {
     const d = db();
     if (!Array.isArray(d.reports) || !d.reports.length) return;
-    if (!d.mail || !d.mail.host) return;               // nothing to send with
+    if (!MAIL.apiKey) return;                          // e-mail is fixed in the code (MAIL)
 
     const now = Date.now();
     for (const row of d.reports) {
